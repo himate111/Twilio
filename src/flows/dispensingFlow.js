@@ -109,13 +109,14 @@ async function start(context) {
   await context.sessionManager.saveSession(context.userId, session);
 
 return [
-  'STEP 1 OF 3',
-  'PATIENT',
+  '📋 Step 1 of 3',
   '',
-  '1 Existing Patient',
-  '2 New Patient',
+  '👤 Patient',
   '',
-  'Reply with 1 or 2'
+  '1️⃣ Existing Patient',
+  '2️⃣ New Patient',
+  '',
+  'Reply with 1 or 2.'
 ].join('\n');
 }
 
@@ -195,15 +196,29 @@ await context.sessionManager.saveSession(
 );
 
 return [
-  'Patients found:',
+  '👥 Patients Found',
   '',
-  ...patients.map(
-    (p, i) =>
-      `${i + 1}. ${p.firstName} | ${p.age ?? 'N/A'} | ${p.gender ?? 'N/A'}`
-  ),
-  
+  ...patients.flatMap((p, i) => {
+    const name = String(p.firstName || '').trim();
+    const displayName = name
+      ? name.charAt(0).toUpperCase() + name.slice(1)
+      : name;
+    const age = p.age === null || p.age === undefined || p.age === ''
+      ? ''
+      : `${p.age} yrs`;
+    const gender = String(p.gender || '').trim();
+    const details = [age, gender]
+      .filter(Boolean)
+      .join(' • ');
+
+    return [
+      `${i + 1}️⃣ ${displayName}`,
+      ...(details ? [`   ${details}`] : []),
+      ...(i < patients.length - 1 ? [''] : [])
+    ];
+  }),
   '',
-  'Select option'
+  'Reply with the patient number.'
 ].join('\n');
 }
 

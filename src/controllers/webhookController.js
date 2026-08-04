@@ -28,6 +28,8 @@ const returnFlow = require('../flows/returnFlow');
 const dispensingFlow = require('../flows/dispensingFlow');
 
 const formatter = require('../utils/formatter');
+const twilioConfig = require('../config/twilio');
+const env = require('../config/env');
 
 const { FLOW_NAMES } = require('../utils/constants');
 
@@ -43,6 +45,26 @@ const services = {
   categoryMasterService,
   medicineMasterService
 };
+
+function toTwiml(response) {
+  return whatsappService.toTwiml(response);
+}
+
+async function sendMessagesSequentially(to, messages) {
+  const client = twilioConfig.getTwilioClient();
+
+  if (!client || !env.twilio.whatsappFrom) {
+    throw new Error('Twilio WhatsApp outbound messaging is not configured.');
+  }
+
+  for (const body of messages) {
+    await client.messages.create({
+      from: env.twilio.whatsappFrom,
+      to: `whatsapp:${to}`,
+      body
+    });
+  }
+}
 
 function createContext(incoming, actor, session = null) {
   return {
@@ -165,9 +187,7 @@ if (!session || !session.authenticated) {
     }
   );
 
-  return `✅ Welcome ${actor.userName}
-
-${menuFlow.renderMainMenu()}`;
+  return formatter.welcomeMessages(actor.userName);
 }
 
   const baseContext = createContext(incoming, session.actor, session);
@@ -191,9 +211,7 @@ ${menuFlow.renderMainMenu()}`;
     }
   );
 
-  return `✅ Welcome ${session.actor.userName}
-
-${menuFlow.renderMainMenu()}`;
+  return formatter.welcomeMessages(session.actor.userName);
 }
 
 console.log(
@@ -260,14 +278,24 @@ const incoming = {
   raw: req.body
 };
 
-    const responseText = await buildReply(incoming);
+    const response = await buildReply(incoming);
 
-    console.log('BOT RESPONSE:', responseText);
+    console.log('BOT RESPONSE:', response);
+
+    if (Array.isArray(response)) {
+      await sendMessagesSequentially(incoming.from, response);
+
+      res
+        .status(200)
+        .type('text/xml')
+        .send(twilioConfig.createMessagingResponse().toString());
+      return;
+    }
 
     res
       .status(200)
       .type('text/xml')
-      .send(whatsappService.toTwiml(responseText));
+      .send(toTwiml(response));
 
   } catch (error) {
     next(error);

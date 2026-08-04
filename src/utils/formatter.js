@@ -22,6 +22,21 @@ function mainMenu() {
   ].join('\n');
 }
 
+function welcomeMessages(userName) {
+  return [
+    [
+      `👋 Welcome to StockTrackRx, ${userName}!`,
+      '',
+      'How can I help you today?',
+      '',
+      'Reply with the number of your choice.'
+    ].join('\n'),
+    '1️⃣ Medicine Dispensing',
+    '2️⃣ Stock Receipt',
+    '3️⃣ Search Medicine'
+  ];
+}
+
 function help() {
   return [
     'Help',
@@ -189,6 +204,7 @@ function askAddAnotherMedicine() {
 module.exports = {
   productDisplayName,
   mainMenu,
+  welcomeMessages,
   help,
   medicineFound,
   receiptRecorded,
