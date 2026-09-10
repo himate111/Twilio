@@ -278,12 +278,61 @@ const incoming = {
   raw: req.body
 };
 
-    const response = await buildReply(incoming);
+    const dryRun =
+      process.env.NODE_ENV !== 'production' &&
+      String(req.body.DryRun || '').toLowerCase() === 'true';
 
-    console.log('BOT RESPONSE:', response);
+    const botResponse = await buildReply(incoming);
 
-    if (Array.isArray(response)) {
-      await sendMessagesSequentially(incoming.from, response);
+    console.log('BOT RESPONSE:', botResponse);
+
+    if (dryRun) {
+      const messages = Array.isArray(botResponse)
+        ? botResponse
+        : [botResponse];
+      const escapeHtml = (message) => String(message)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      const messageBubbles = messages
+        .map((message) => `<div class="message-bubble">${escapeHtml(message)}</div>`)
+        .join('');
+
+      console.log('DRY RUN MODE: Twilio send skipped');
+      res
+        .status(200)
+        .type('html')
+        .send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DRY RUN PREVIEW</title>
+  <style>
+    body { margin: 0; padding: 24px; background: #ece5dd; color: #111b21; font-family: Arial, sans-serif; }
+    .preview { max-width: 420px; margin: 0 auto; }
+    h1 { margin: 0; font-size: 16px; letter-spacing: .08em; }
+    .notice { margin: 6px 0 16px; color: #667781; font-size: 14px; }
+    .chat { padding: 14px; background: #e5ddd5; border-radius: 12px; }
+    .message-bubble { width: fit-content; max-width: 85%; margin: 0 0 10px; padding: 8px 10px; background: #fff; border-radius: 0 8px 8px; box-shadow: 0 1px 1px rgba(0, 0, 0, .12); line-height: 1.4; white-space: pre-wrap; }
+    .message-bubble:last-child { margin-bottom: 0; }
+  </style>
+</head>
+<body>
+  <main class="preview">
+    <h1>DRY RUN PREVIEW</h1>
+    <p class="notice">No WhatsApp message was sent</p>
+    <section class="chat">${messageBubbles}</section>
+  </main>
+</body>
+</html>`);
+      return;
+    }
+
+    if (Array.isArray(botResponse)) {
+      await sendMessagesSequentially(incoming.from, botResponse);
 
       res
         .status(200)
@@ -295,7 +344,7 @@ const incoming = {
     res
       .status(200)
       .type('text/xml')
-      .send(toTwiml(response));
+      .send(toTwiml(botResponse));
 
   } catch (error) {
     next(error);
