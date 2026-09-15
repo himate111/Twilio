@@ -75,9 +75,34 @@ function createContext(incoming, actor, session = null) {
     media: incoming.media,
     messageSid: incoming.messageSid,
     raw: incoming.raw,
+    traceTiming: incoming.traceTiming,
     sessionManager,
     services
   };
+}
+
+function createTimingLogger(startedAt) {
+  return (event) => {
+    console.log(`[RX TIMING] ${event} elapsedMs=${Date.now() - startedAt}`);
+  };
+}
+
+function isPrescriptionUpload(incoming, session) {
+  return Boolean(
+    incoming.media.length &&
+    session &&
+    session.authenticated &&
+    session.flow === FLOW_NAMES.DISPENSING &&
+    session.step === 'prescription_upload'
+  );
+}
+
+function cloneSession(session) {
+  return JSON.parse(JSON.stringify(session));
+}
+
+function isDevelopmentLocalPrescription(req) {
+  return Boolean(req.file) && !env.isProduction;
 }
 
 async function startFlowByChoice(choice, context) {
@@ -214,6 +239,10 @@ if (!session || !session.authenticated) {
   return formatter.welcomeMessages(session.actor.userName);
 }
 
+  if (session.prescriptionProcessing) {
+    return 'Prescription is being processed. Please wait for the result before sending another reply.';
+  }
+
 console.log(
   'CURRENT FLOW:',
   session?.flow
@@ -240,8 +269,49 @@ console.log(
   return inventoryLookupFlow.quickLookup(baseContext);
 }
 
+async function processPrescriptionAsync(incoming, session, startedAt) {
+  const traceTiming = createTimingLogger(startedAt);
+  const expectedMessageSid = incoming.messageSid;
+
+  try {
+    const currentSession = await sessionManager.getSession(incoming.from);
+    if (!currentSession || currentSession.prescriptionProcessing?.messageSid !== expectedMessageSid) {
+      console.log(`[RX TIMING] async processing skipped elapsedMs=${Date.now() - startedAt} reason=session_changed`);
+      return;
+    }
+
+    const processingSession = cloneSession(session);
+    delete processingSession.prescriptionProcessing;
+    const response = await dispensingFlow.handle(createContext(
+      { ...incoming, traceTiming },
+      processingSession.actor,
+      processingSession
+    ));
+    traceTiming('response generated');
+
+    const messages = Array.isArray(response) ? response : [response];
+    await sendMessagesSequentially(incoming.from, messages);
+    await sessionManager.completeMessageProcessing(expectedMessageSid, response);
+    traceTiming('response sent');
+  } catch (error) {
+    console.error('[RX] asynchronous prescription processing failed:', error);
+
+    try {
+      const safeResponse = 'Unable to read that prescription image. Please upload a clear JPEG or PNG image.';
+      await sendMessagesSequentially(incoming.from, [safeResponse]);
+      await sessionManager.completeMessageProcessing(expectedMessageSid, safeResponse);
+      console.log(`[RX TIMING] response sent elapsedMs=${Date.now() - startedAt} fallback=true`);
+    } catch (sendError) {
+      console.error('[RX] unable to send asynchronous prescription failure response:', sendError);
+    }
+  }
+}
+
 async function handleWhatsappWebhook(req, res, next) {
   try {
+    const startedAt = Date.now();
+    const traceTiming = createTimingLogger(startedAt);
+    traceTiming('webhook received');
     console.log('TWILIO WEBHOOK HIT');
     console.log(req.body);
 
@@ -275,14 +345,48 @@ const incoming = {
   body: req.body.Body || '',
   messageSid: req.body.MessageSid,
   media,
-  raw: req.body
+  raw: req.body,
+  traceTiming
 };
 
     const dryRun =
       process.env.NODE_ENV !== 'production' &&
       String(req.body.DryRun || '').toLowerCase() === 'true';
 
+    const existingSession = await sessionManager.getSession(incoming.from);
+    const localSynchronousPrescription = isDevelopmentLocalPrescription(req);
+    if (!dryRun && !localSynchronousPrescription && isPrescriptionUpload(incoming, existingSession)) {
+      const acquired = await sessionManager.acquireMessageProcessing(incoming.messageSid);
+
+      res
+        .status(200)
+        .type('text/xml')
+        .send(twilioConfig.createMessagingResponse().toString());
+      traceTiming('webhook acknowledged');
+
+      if (!acquired) {
+        console.log(`[RX TIMING] duplicate prescription ignored elapsedMs=${Date.now() - startedAt} messageSid=${incoming.messageSid}`);
+        return;
+      }
+
+      const processingSession = cloneSession(existingSession);
+      processingSession.prescriptionProcessing = {
+        messageSid: incoming.messageSid,
+        startedAt: new Date().toISOString(),
+        patientId: existingSession.data?.patientId,
+        patientName: existingSession.data?.patientName,
+        facilityId: existingSession.facilityId
+      };
+      await sessionManager.saveSession(incoming.from, processingSession);
+
+      setImmediate(() => {
+        processPrescriptionAsync(incoming, processingSession, startedAt);
+      });
+      return;
+    }
+
     const botResponse = await buildReply(incoming);
+    traceTiming('response generated');
 
     console.log('BOT RESPONSE:', botResponse);
 
@@ -328,6 +432,7 @@ const incoming = {
   </main>
 </body>
 </html>`);
+      traceTiming('response sent');
       return;
     }
 
@@ -338,6 +443,7 @@ const incoming = {
         .status(200)
         .type('text/xml')
         .send(twilioConfig.createMessagingResponse().toString());
+      traceTiming('response sent');
       return;
     }
 
@@ -345,6 +451,7 @@ const incoming = {
       .status(200)
       .type('text/xml')
       .send(toTwiml(botResponse));
+    traceTiming('response sent');
 
   } catch (error) {
     next(error);

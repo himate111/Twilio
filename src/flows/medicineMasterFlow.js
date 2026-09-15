@@ -31,8 +31,11 @@ function renderMenu() {
     '💊 MEDICINE MASTER',
     '',
     '1. List medicines',
+    '',
     '2. Add medicine',
+    '',
     '3. Edit medicine',
+    '',
     '4. Search by name/generic',
     '',
     'Type number:'

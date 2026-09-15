@@ -72,10 +72,6 @@ async function handle(context) {
         `${index + 1}. ${medicine.name}`
       );
 
-      output.push(
-        `Stock: ${medicine.stock}`
-      );
-
       if (
         medicine.batches &&
         medicine.batches.length
@@ -93,7 +89,13 @@ async function handle(context) {
         );
       }
 
-      output.push('');
+      output.push(
+        `Stock: ${medicine.stock}`
+      );
+
+      if (index < medicines.length - 1) {
+        output.push('');
+      }
     }
   );
 

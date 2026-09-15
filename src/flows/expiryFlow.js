@@ -83,6 +83,7 @@ async function handleBatchEntry(context, session, data) {
     'Batch not found or no stock available.',
     '',
     '1. Main Menu',
+    '',
     '2. Try Another Batch'
   ].join('\n');
 }
@@ -109,7 +110,9 @@ async function handleBatchEntry(context, session, data) {
       '',
       'Medicine has not expired yet.',
       'Create expiry alert?',
+      '',
       '1. Yes',
+      '',
       '2. No'
     ].join('\n');
   }
@@ -226,7 +229,9 @@ async function handleDisposalMethodEntry(context, session, data) {
     `Disposal Method: ${method.value}`,
     '',
     'Confirm?',
+    '',
     '1. Yes',
+    '',
     '2. No'
   ].join('\n');
 }

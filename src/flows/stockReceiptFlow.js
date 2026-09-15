@@ -294,6 +294,7 @@ function stockReceiptMenu() {
     'Stock Receipt',
     '',
     '1. Create Order',
+    '',
     '2. Receive Stock',
     '',
     'Reply with 1 or 2.'
@@ -317,7 +318,9 @@ function askMedicineSearchForOrder() {
 function askReceiveAnotherMedicine() {
   return [
     'Receive another medicine from this order?',
+    '',
     '1. Yes',
+    '',
     '2. No'
   ].join('\n');
 }
@@ -325,6 +328,7 @@ function askReceiveAnotherMedicine() {
 function confirmationPrompt() {
   return [
     '1. Confirm',
+    '',
     '2. Re-enter'
   ].join('\n');
 }
@@ -333,10 +337,10 @@ function renderVendorMatches(vendors) {
   return [
     'Vendors found:',
     '',
-    ...vendors.map(
-      (vendor, index) =>
-        `${index + 1}. ${vendorDisplayName(vendor)}`
-    ),
+    ...vendors.flatMap((vendor, index) => [
+      `${index + 1}. ${vendorDisplayName(vendor)}`,
+      ...(index < vendors.length - 1 ? [''] : [])
+    ]),
     '',
     'Select vendor number, or type another search.'
   ].join('\n');
@@ -346,10 +350,10 @@ function renderMedicineMatches(medicines) {
   return [
     'Medicines found:',
     '',
-    ...medicines.map(
-      (medicine, index) =>
-        `${index + 1}. ${medicineDisplayName(medicine)}`
-    ),
+    ...medicines.flatMap((medicine, index) => [
+      `${index + 1}. ${medicineDisplayName(medicine)}`,
+      ...(index < medicines.length - 1 ? [''] : [])
+    ]),
     '',
     'Select medicine number, or type another search.'
   ].join('\n');
@@ -369,7 +373,7 @@ function renderPendingOrders(orders, facilityName) {
   return [
     'Pending Stock Orders',
     '',
-    ...orders.map((order, index) => {
+    ...orders.flatMap((order, index) => {
       const vendor =
         order.vendor ||
         order.Vendor ||
@@ -381,11 +385,12 @@ function renderPendingOrders(orders, facilityName) {
         order.lineCount ||
         0;
 
-      return [
+      const record = [
         `${index + 1}. ${orderDisplayCode(order)}`,
         `   Vendor: ${vendorDisplayName(vendor)}`,
         `   Medicines: ${totalLines}`
       ].join('\n');
+      return [record, ...(index < orders.length - 1 ? [''] : [])];
     }),
     '',
     'Select order number.'
@@ -403,7 +408,7 @@ function renderOrderMedicines(order, receiptItems = []) {
   return [
     'Medicines in Order',
     '',
-    ...remainingLines.map((line, index) => {
+    ...remainingLines.flatMap((line, index) => {
       const medicine = medicineFromLine(line);
       const required = requiredQuantityFromLine(line);
       const alreadyReceived = receivedQuantityFromLine(line);
@@ -412,12 +417,13 @@ function renderOrderMedicines(order, receiptItems = []) {
         required - alreadyReceived
       );
 
-      return [
+      const record = [
         `${index + 1}. ${medicineDisplayName(medicine)}`,
         `   Ordered: ${required}`,
         `   Received: ${alreadyReceived}`,
         `   Remaining: ${remaining}`
       ].join('\n');
+      return [record, ...(index < remainingLines.length - 1 ? [''] : [])];
     }),
     '',
     'Select medicine number.'
@@ -434,11 +440,11 @@ function buildCreateOrderSummary(session) {
     `Facility: ${session.actor.facilityName}`,
     `Vendor: ${vendorDisplayName(vendor)}`,
     '',
-    ...items.map(
-      (item, index) =>
-        `${index + 1}. ${medicineDisplayName(item.medicine)}\n` +
-        `   Qty Required: ${item.quantityRequired}`
-    ),
+    ...items.flatMap((item, index) => [
+      `${index + 1}. ${medicineDisplayName(item.medicine)}\n` +
+      `   Qty Required: ${item.quantityRequired}`,
+      ...(index < items.length - 1 ? [''] : [])
+    ]),
     '',
     confirmationPrompt()
   ].join('\n');
@@ -460,13 +466,13 @@ function buildReceiptSummary(session) {
     `Order: ${orderDisplayCode(order)}`,
     `Vendor: ${vendorDisplayName(vendor)}`,
     '',
-    ...items.map((item, index) => {
+    ...items.flatMap((item, index) => {
       const overage =
         item.quantityReceived > item.quantityRequired
           ? item.quantityReceived - item.quantityRequired
           : 0;
 
-      return [
+      const record = [
         `${index + 1}. ${medicineDisplayName(item.medicine)}`,
         `   Ordered: ${item.quantityRequired}`,
         `   Received: ${item.quantityReceived}`,
@@ -475,6 +481,7 @@ function buildReceiptSummary(session) {
         `   Delivery: ${item.deliveryStatus}`,
         overage > 0 ? `   Overage: ${overage}` : ''
       ].filter(Boolean).join('\n');
+      return [record, ...(index < items.length - 1 ? [''] : [])];
     }),
     '',
     confirmationPrompt()
@@ -826,6 +833,7 @@ return[
 "📦 Stock Receipt",
 "",
 "1. Create Order",
+'',
 "2. Receive Stock"
 ].join("\n");
 
@@ -1105,12 +1113,12 @@ return [
     ...medicineLines,
     "Status: Pending",
     "",
-    "────────────────────",
-    "",
     "What would you like to do next?",
     "",
     "1️⃣ Create Another Order",
+    "",
     "2️⃣ Receive Stock",
+    "",
     "0️⃣ Return to Main Menu"
 ].join("\n");
 }
@@ -1501,7 +1509,9 @@ async function handleOrderCreatedMenu(context, session) {
             "What would you like to do next?",
             "",
             "1️⃣ Create Another Order",
+            '',
             "2️⃣ Receive Stock",
+            '',
             "0️⃣ Return to Main Menu"
         ].join("\n");
     }
@@ -1586,6 +1596,7 @@ return[
 "📦 Stock Receipt",
 "",
 "1. Create Order",
+'',
 "2. Receive Stock",
 "",
 "Reply with an option."

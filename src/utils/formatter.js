@@ -16,24 +16,34 @@ function mainMenu() {
     '🏥 Drug Supply Assistant',
     '',
     'Main Menu:',
+    '',
     '1️⃣ Medicine Dispensing',
+    '',
     '2️⃣ Stock Receipt',
+    '',
     '3️⃣ Search Medicine'
   ].join('\n');
 }
 
 function welcomeMessages(userName) {
+  const displayName = String(userName || '')
+    .trim()
+    .replace(/\s+WhatsApp$/i, '');
+
   return [
     [
-      `👋 Welcome to StockTrackRx, ${userName}!`,
+      `👋 Welcome to StockTrackRx, ${displayName} WhatsApp!`,
       '',
       'How can I help you today?',
       '',
-      'Reply with the number of your choice.'
-    ].join('\n'),
-    '1️⃣ Medicine Dispensing',
-    '2️⃣ Stock Receipt',
-    '3️⃣ Search Medicine'
+      'Reply with the number of your choice.',
+      '',
+      '1️⃣ Medicine Dispensing',
+      '',
+      '2️⃣ Stock Receipt',
+      '',
+      '3️⃣ Search Medicine'
+    ].join('\n')
   ];
 }
 
@@ -134,9 +144,11 @@ function expiryAlert(alert, index = 0, total = 1) {
     `Qty: ${alert.availableQuantity ?? alert.available_quantity}`,
     '',
     'Options:',
+    '',
     '1. Acknowledge',
+    '',
     '2. Dispose'
-  ].filter((line) => line !== '').join('\n');
+  ].filter((line, index, lines) => line !== '' || lines[index - 1] !== '').join('\n');
 }
 
 function noExpiryAlerts(days) {
@@ -196,7 +208,9 @@ function invalidOption() {
 function askAddAnotherMedicine() {
   return [
     'Would you like to add another medicine?',
+    '',
     '1. Yes',
+    '',
     '2. No'
   ].join('\n');
 }

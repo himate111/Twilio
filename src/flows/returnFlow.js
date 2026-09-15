@@ -35,8 +35,11 @@ async function start(context) {
     '↩ Return Processing',
     '',
     'Select return type:',
+    '',
     '1 Facility → AMS',
+    '',
     '2 Facility → Facility',
+    '',
     '3 Patient Return'
   ].join('\n');
 }
@@ -148,6 +151,7 @@ async function handle(context) {
         `Reason: ${session.data.reason}`,
         '',
         '1 Confirm',
+        '',
         '2 Cancel'
       ].join('\n');
 
@@ -227,8 +231,11 @@ case STEPS.PATIENT_QUANTITY_ENTRY:
 
   return [
     'Select condition:',
+    '',
     '1 Unopened',
+    '',
     '2 Opened',
+    '',
     '3 Damaged'
   ].join('\n');
 
@@ -264,6 +271,7 @@ case STEPS.PATIENT_REASON_ENTRY:
     `Reason: ${session.data.reason}`,
     '',
     '1 Confirm',
+    '',
     '2 Cancel'
   ].join('\n');
 

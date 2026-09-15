@@ -6,7 +6,8 @@ const webhookValidator = require('../middleware/webhookValidator');
 const router = express.Router();
 
 const upload = multer({
-  dest: 'uploads/'
+  dest: 'uploads/',
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 router.post(

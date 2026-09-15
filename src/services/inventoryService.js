@@ -32,6 +32,100 @@ function normalizeProduct(row = {}) {
   };
 }
 
+function normalizeMedicineName(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function normalizeStrength(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '');
+}
+
+function normalizeDosageForm(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/s$/, '');
+}
+
+function parseMedicineIdentity(query) {
+  const text = String(query || '').trim().replace(/\s+/g, ' ');
+  const formMatch = text.match(/\s+(tablet|capsule|syrup|suspension|injection|drops?|ointment|cream|gel|inhaler|vial|ampoule)s?$/i);
+  const dosageForm = formMatch ? formMatch[1] : null;
+  const withoutForm = formMatch ? text.slice(0, formMatch.index).trim() : text;
+  const strengthMatch = withoutForm.match(/^(.*?)\s+(\d+(?:\.\d+)?\s*(?:mcg|mg|g|ml|iu|units?)(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:mcg|mg|g|ml|iu|units?))?)$/i);
+
+  return {
+    name: normalizeMedicineName(strengthMatch ? strengthMatch[1] : withoutForm),
+    strength: strengthMatch ? normalizeStrength(strengthMatch[2]) : null,
+    dosageForm: dosageForm ? normalizeDosageForm(dosageForm) : null
+  };
+}
+
+async function findStructuredMedicine(query) {
+  const identity = parseMedicineIdentity(query);
+
+  if (!identity.name || !identity.strength) {
+    return { status: 'not_found', identity };
+  }
+
+  const rows = await db.query(`
+    SELECT
+      id,
+      "medicineName",
+      "genericName",
+      strength,
+      "dosageForm",
+      "isActive"
+    FROM "Medicine"
+    WHERE "isActive" = true
+  `);
+
+  let matches = rows.filter((medicine) => {
+    if (medicine.isActive === false) {
+      return false;
+    }
+
+    const nameMatches = normalizeMedicineName(medicine.medicineName) === identity.name;
+    const genericMatches = normalizeMedicineName(medicine.genericName) === identity.name;
+
+    return (nameMatches || genericMatches)
+      && normalizeStrength(medicine.strength) === identity.strength;
+  });
+
+  if (matches.length > 1 && identity.dosageForm) {
+    matches = matches.filter((medicine) =>
+      normalizeDosageForm(medicine.dosageForm) === identity.dosageForm
+    );
+  }
+
+  if (matches.length !== 1) {
+    return {
+      status: matches.length ? 'ambiguous' : 'not_found',
+      identity,
+      matches
+    };
+  }
+
+  const medicine = matches[0];
+  return {
+    status: 'matched',
+    identity,
+    medicine: {
+      id: medicine.id,
+      name: medicine.medicineName,
+      generic_name: medicine.genericName,
+      strength: medicine.strength,
+      formulation: medicine.dosageForm
+    }
+  };
+}
 function productIdFrom(input) {
   return input.productId || input.product_id || input.product?.id;
 }
@@ -80,7 +174,7 @@ async function searchProductsByQuery(query) {
 }
 
 
-async function findMedicineFuzzy(query) {
+async function findMedicineFuzzy(query, options = {}) {
 
   const rows = await db.query(`
     SELECT
@@ -93,11 +187,17 @@ async function findMedicineFuzzy(query) {
     WHERE "isActive" = true
   `);
 
-  if (!rows.length) {
+  const compatibleRows = options.requiredStrength
+    ? rows.filter((medicine) =>
+        normalizeStrength(medicine.strength) === options.requiredStrength
+      )
+    : rows;
+
+  if (!compatibleRows.length) {
     return null;
   }
 
-  const fuse = new Fuse(rows, {
+  const fuse = new Fuse(compatibleRows, {
     keys: [
       "medicineName",
       "genericName",
@@ -1195,6 +1295,11 @@ const lowStockThreshold =
 
 module.exports = {
   normalizeProduct,
+  normalizeMedicineName,
+  normalizeStrength,
+  normalizeDosageForm,
+  parseMedicineIdentity,
+  findStructuredMedicine,
   loadActiveProducts,
   searchProductsByQuery,
   findBestProduct,

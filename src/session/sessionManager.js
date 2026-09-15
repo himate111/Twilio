@@ -112,6 +112,50 @@ class SessionManager {
 
     this.setMemoryValue(this.memoryMessages, key, payload);
   }
+
+  async acquireMessageProcessing(messageSid) {
+    if (!messageSid) {
+      return true;
+    }
+
+    const key = this.messageKey(messageSid);
+    const payload = JSON.stringify({
+      state: 'processing',
+      startedAt: new Date().toISOString()
+    });
+
+    if (this.redis) {
+      const result = await this.redis.set(key, payload, 'EX', this.ttlSeconds, 'NX');
+      return result === 'OK';
+    }
+
+    if (this.getMemoryValue(this.memoryMessages, key)) {
+      return false;
+    }
+
+    this.setMemoryValue(this.memoryMessages, key, JSON.parse(payload));
+    return true;
+  }
+
+  async completeMessageProcessing(messageSid, responseText) {
+    if (!messageSid) {
+      return;
+    }
+
+    const key = this.messageKey(messageSid);
+    const payload = {
+      state: 'completed',
+      responseText,
+      processedAt: new Date().toISOString()
+    };
+
+    if (this.redis) {
+      await this.redis.set(key, JSON.stringify(payload), 'EX', this.ttlSeconds);
+      return;
+    }
+
+    this.setMemoryValue(this.memoryMessages, key, payload);
+  }
 }
 
 module.exports = SessionManager;

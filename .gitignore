@@ -11,3 +11,7 @@ uploads/
 logs/
 *.log
 .DS_Store
+
+# Runtime OCR model cache and Python bytecode
+.ocr-models/
+ocr/__pycache__/

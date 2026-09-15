@@ -60,6 +60,7 @@ const finalNotes =
     `Notes: ${finalNotes || 'N/A'}`,
     '',
     '1. Confirm',
+    '',
     '2. Re-enter'
   ].join('\n');
 }
@@ -169,9 +170,13 @@ async function handleAdjustmentQtyEntry(
 
   return [
     'Select reason:',
+    '',
     '1. Audit Count',
+    '',
     '2. Damage',
+    '',
     '3. Loss',
+    '',
     '4. Other'
   ].join('\n');
 }
@@ -190,9 +195,13 @@ async function handleReasonEntry(
   if (!option.valid) {
     return [
       'Select reason:',
+      '',
       '1. Audit Count',
+      '',
       '2. Damage',
+      '',
       '3. Loss',
+      '',
       '4. Other'
     ].join('\n');
   }

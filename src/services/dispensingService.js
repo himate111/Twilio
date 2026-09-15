@@ -37,147 +37,127 @@ async function getMedicineBatches(
 }
 
 
+async function resolveMedicineAvailability(medicine, facilityId) {
+  console.log(
+    'USER FACILITY:',
+    facilityId
+  );
+  console.log(
+    'MEDICINE ID:',
+    medicine.id
+  );
+
+  const stock = await inventoryService.getAvailableStock(
+    medicine.id,
+    facilityId
+  );
+
+  if (stock <= 0) {
+    console.log('MEDICINE FOUND BUT NO STOCK');
+    throw new Error('Medicine out of stock.');
+  }
+
+  const batches = await inventoryService.getAvailableBatches(
+    medicine.id,
+    facilityId
+  );
+  const batch = batches[0];
+
+  return [{
+    ...medicine,
+    stock,
+    batchId: batch?.id || null,
+    batchNumber: batch?.batchNumber || 'N/A',
+    expiryDate: batch?.expiryDate || 'N/A'
+  }];
+}
+
+async function resolveSuggestedMedicine(suggestion, facilityId) {
+  if (!suggestion?.suggestedMedicine?.id) {
+    throw new Error('Suggested medicine is unavailable.');
+  }
+
+  return resolveMedicineAvailability(
+    suggestion.suggestedMedicine,
+    facilityId
+  );
+}
 async function searchMedicines(
   query,
   facilityId
 ) {
+  const structured = await inventoryService.findStructuredMedicine(query);
 
-  try {
+  if (structured.status === 'matched') {
+    console.log('STRUCTURED MATCH FOUND:', structured.medicine.name);
+    return resolveMedicineAvailability(structured.medicine, facilityId);
+  }
 
-    const results =
-      await inventoryService
-        .lookupAvailableInventory(
-          query,
-          facilityId,
-          20
-        );
+  if (structured.status === 'ambiguous') {
+    return [{
+      detected: query,
+      suggested: null,
+      confidence: 0,
+      ambiguous: true,
+      alternatives: structured.matches.map((medicine) => ({
+        name: medicine.medicineName,
+        strength: medicine.strength,
+        formulation: medicine.dosageForm
+      }))
+    }];
+  }
 
-    if (results.length) {
-
-      console.log(
-        'DIRECT MATCH FOUND:',
-        results[0].name
+  if (!structured.identity.strength) {
+    try {
+      const results = await inventoryService.lookupAvailableInventory(
+        query,
+        facilityId,
+        20
       );
 
-      return results;
+      if (results.length) {
+        console.log('DIRECT MATCH FOUND:', results[0].name);
+        return results;
+      }
+    } catch (err) {
+      console.log('DIRECT MATCH FAILED:', err.message);
     }
-
-  } catch (err) {
-    console.log(
-      'DIRECT MATCH FAILED:',
-      err.message
-    );
   }
 
-  console.log(
-    'NO DIRECT MATCH. TRYING FUZZY:',
-    query
-  );
+  console.log('NO DIRECT MATCH. TRYING FUZZY:', query);
 
- const fuzzy =
-  await inventoryService
-    .findMedicineFuzzy(
-      query
-    );
+  const fuzzy = await inventoryService.findMedicineFuzzy(query, {
+    requiredStrength: structured.identity.strength || undefined
+  });
 
-if (!fuzzy) {
-  throw new Error(
-    'Medicine not found.'
-  );
-}
-
-const medicine =
-  fuzzy.medicine;
-
-const confidence =
-  fuzzy.confidence;
-
- if (!medicine) {
-
-  return [{
-    detected: query,
-    suggested: null,
-    confidence: 0
-  }];
-}
-
-  console.log(
-    'FUZZY MATCH FOUND:',
-    medicine.name
-  );
-
-  if (
-  confidence >= 40 &&
-  confidence < 80
-) {
-
-  return [{
-    detected:
-      fuzzy.detected,
-
-    suggested:
-      medicine.name,
-
-    confidence
-  }];
-}
-
-  console.log(
-  'USER FACILITY:',
-  facilityId
-);
-
-console.log(
-  'MEDICINE ID:',
-  medicine.id
-);
-
-  const stock =
-    await inventoryService
-      .getAvailableStock(
-        medicine.id,
-        facilityId
-      );
-
-  if (stock <= 0) {
-
-    console.log(
-      'MEDICINE FOUND BUT NO STOCK'
-    );
-
-    throw new Error(
-      'Medicine out of stock.'
-    );
+  if (!fuzzy) {
+    throw new Error('Medicine not found.');
   }
 
-  const batches =
-    await inventoryService
-      .getAvailableBatches(
-        medicine.id,
-        facilityId
-      );
+  const medicine = fuzzy.medicine;
+  const confidence = fuzzy.confidence;
 
-  const batch =
-    batches[0];
+  if (!medicine) {
+    return [{
+      detected: query,
+      suggested: null,
+      confidence: 0
+    }];
+  }
 
-  return [{
-    ...medicine,
+  console.log('FUZZY MATCH FOUND:', medicine.name);
 
-    stock,
+  if (confidence >= 40 && confidence < 80) {
+    return [{
+      detected: fuzzy.detected,
+      suggested: medicine.name,
+      suggestedMedicine: medicine,
+      confidence
+    }];
+  }
 
-    batchId:
-      batch?.id || null,
-
-    batchNumber:
-      batch?.batchNumber ||
-      'N/A',
-
-    expiryDate:
-      batch?.expiryDate ||
-      'N/A'
-  }];
+  return resolveMedicineAvailability(medicine, facilityId);
 }
-
 async function updatePatientName(
   patientId,
   patientName
@@ -441,6 +421,7 @@ if (!medicines.length) {
 module.exports = {
   lookupMedicine,
   searchMedicines,
+  resolveSuggestedMedicine,
   updatePatientName,
   searchMedicinesForLookup,
   searchMedicinesFromText,
