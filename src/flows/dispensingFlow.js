@@ -51,8 +51,14 @@ const STEPS = {
   QUANTITY_ENTRY:
     'quantity_entry',
 
-    OCR_QUANTITY_ENTRY:
-  'ocr_quantity_entry',
+  OCR_QUANTITY_CONFIRMATION:
+    'ocr_quantity_confirmation',
+
+  OCR_QUANTITY_OVERRIDE_ENTRY:
+    'ocr_quantity_override_entry',
+
+  OCR_QUANTITY_ENTRY:
+    'ocr_quantity_entry',
 
   OCR_REVIEW: 'ocr_review',
 
@@ -135,17 +141,88 @@ function resetOcrState(session) {
   delete session.data.prescriptionName;
 }
 
-function toOcrItem(medicine) {
+function toOcrItem(medicine, candidate = {}) {
+  const calculatedQty = candidate.calculatedQuantity ?? null;
+  const explicitQty = candidate.explicitQuantity ?? null;
+  const availableStock = medicine.stock ?? 0;
+
+  let quantity = null;
+  if (typeof calculatedQty === 'number' && calculatedQty > 0 && calculatedQty <= availableStock) {
+    quantity = calculatedQty;
+  } else if (typeof explicitQty === 'number' && explicitQty > 0 && explicitQty <= availableStock) {
+    quantity = explicitQty;
+  }
+
   return {
     productId: medicine.id,
     medicineName: medicine.name,
-    quantity: null,
+    quantity,
     batch: medicine.batchNumber || 'N/A',
     expiryDate: medicine.expiryDate || 'N/A',
-    availableStock: medicine.stock || 0,
-    controlledDrug: medicine.controlledDrug
+    availableStock,
+    controlledDrug: medicine.controlledDrug,
+    rawText: candidate.rawText || null,
+    medicineText: candidate.medicineText || null,
+    prescribedQuantityText: candidate.prescribedQuantityText || null,
+    dosePerAdministration: candidate.dosePerAdministration || null,
+    frequency: candidate.frequency || null,
+    duration: candidate.duration || null,
+    calculatedQuantity: calculatedQty,
+    explicitQuantity: explicitQty,
+    numericQuantity: candidate.numericQuantity || null,
+    quantitySource: candidate.quantitySource || 'manual_input_required',
+    quantityConfidence: candidate.quantityConfidence || null
   };
 }
+function mergeOcrItems(existing, incoming) {
+  const existingQty = typeof existing.quantity === 'number' ? existing.quantity : null;
+  const incomingQty = typeof incoming.quantity === 'number' ? incoming.quantity : null;
+
+  if (existingQty === null && incomingQty !== null) {
+    existing.quantity = incomingQty;
+    existing.prescribedQuantityText = incoming.prescribedQuantityText || existing.prescribedQuantityText;
+    existing.dosePerAdministration = incoming.dosePerAdministration ?? existing.dosePerAdministration;
+    existing.frequency = incoming.frequency ?? existing.frequency;
+    existing.duration = incoming.duration ?? existing.duration;
+    existing.calculatedQuantity = incoming.calculatedQuantity ?? existing.calculatedQuantity;
+    existing.explicitQuantity = incoming.explicitQuantity ?? existing.explicitQuantity;
+    existing.numericQuantity = incoming.numericQuantity ?? existing.numericQuantity;
+    existing.quantitySource = incoming.quantitySource;
+    existing.quantityConfidence = incoming.quantityConfidence;
+  } else if (existingQty !== null && incomingQty === null) {
+    // Keep existing trusted quantity
+  } else if (existingQty !== null && incomingQty !== null) {
+    if (existingQty === incomingQty) {
+      // Same trusted quantity -> keep one
+    } else {
+      // Conflicting trusted quantities -> require manual quantity review
+      existing.quantity = null;
+      existing.calculatedQuantity = null;
+      existing.explicitQuantity = null;
+      existing.numericQuantity = null;
+      existing.quantitySource = 'manual_input_required';
+      existing.quantityConfidence = null;
+    }
+  }
+
+  if (!existing.batch || existing.batch === 'N/A') existing.batch = incoming.batch;
+  if (!existing.expiryDate || existing.expiryDate === 'N/A') existing.expiryDate = incoming.expiryDate;
+  if (!existing.availableStock && incoming.availableStock) existing.availableStock = incoming.availableStock;
+
+  return existing;
+}
+
+function addOrMergeOcrItem(session, newItem) {
+  session.data.items = session.data.items || [];
+  const existing = session.data.items.find(item => item.productId === newItem.productId);
+  if (existing) {
+    mergeOcrItems(existing, newItem);
+    return existing;
+  }
+  session.data.items.push(newItem);
+  return newItem;
+}
+
 
 function renderPossibleMatch(medicine) {
   return [
@@ -185,10 +262,50 @@ function renderAmbiguousMatch(medicine) {
     '0 Cancel'
   ].join('\n');
 }
-function renderOcrAnalysis(session) {
+
+function formatQuantityToDispense(item) {
+  if (item.prescribedQuantityText) {
+    return item.prescribedQuantityText;
+  }
+  const qty = typeof item.calculatedQuantity === 'number'
+    ? item.calculatedQuantity
+    : (typeof item.quantity === 'number' ? item.quantity : null);
+  if (typeof qty === 'number') {
+    const unit = qty === 1 ? 'tablet' : 'tablets';
+    return `${qty} ${unit}`;
+  }
+  return 'Enter manually';
+}
+
+function renderDispensingSummary(session) {
   const matched = session.data.items.map(
     (item, i) =>
-      `${i + 1}. ${item.medicineName}\nBatch: ${item.batch}\nExpiry: ${item.expiryDate}\nStock: ${item.availableStock}`
+      `${i + 1}. ${item.medicineName}\nBatch: ${item.batch}\nExpiry: ${item.expiryDate}\nQty: ${item.quantity}`
+  );
+
+  return [
+    'DISPENSING SUMMARY',
+    '',
+    ...matched.flatMap((line, index) => [
+      line,
+      ...(index < matched.length - 1 ? [''] : [])
+    ]),
+    '',
+    '1 Confirm Dispense',
+    '',
+    '2 Cancel'
+  ].join('\n');
+}
+
+function renderOcrAnalysis(session) {
+  const matched = session.data.items.map(
+    (item, i) => [
+      `${i + 1}. ${item.medicineName}`,
+      `Quantity to dispense: ${formatQuantityToDispense(item)}`,
+      `Batch: ${item.batch}`,
+      `Expiry: ${item.expiryDate}`,
+      `Stock: ${item.availableStock}`
+    ].join('\n')
   );
   const unmatched = session.data.unmatchedMedicines.length
     ? session.data.unmatchedMedicines.map((medicine) => `• ${medicine}`)
@@ -214,6 +331,28 @@ function renderOcrAnalysis(session) {
   ].join('\n');
 }
 
+function renderQuantityPrompt(item, isRecorded = false) {
+  const parts = [];
+  if (isRecorded) {
+    parts.push('Quantity Recorded', '');
+  }
+  parts.push(item.medicineName, '');
+  parts.push(`Quantity to dispense: ${formatQuantityToDispense(item)}`, '');
+  parts.push(`Batch: ${item.batch}`);
+  parts.push(`Expiry: ${item.expiryDate}`);
+  parts.push(`Available Stock: ${item.availableStock}`);
+  parts.push('');
+
+  if (typeof item.quantity === 'number' && item.quantity > 0) {
+    parts.push('1 Keep this quantity');
+    parts.push('2 Enter a different quantity');
+  } else {
+    parts.push('Enter quantity:');
+  }
+  return parts.join('\n');
+}
+
+
 async function processOcrCandidates(context, session) {
   const candidates = session.data.ocrCandidates || [];
   session.data.items = session.data.items || [];
@@ -234,12 +373,27 @@ async function processOcrCandidates(context, session) {
       );
 
       if (!results.length) {
+        console.log('\nMASTER MATCH:');
+        console.log(`candidate: ${medicineLine}`);
+        console.log('matched product: null');
+        console.log('match type: none');
+        console.log('confidence if fuzzy: null');
+        console.log('active: false');
+        console.log('availability: null');
         session.data.unmatchedMedicines.push(medicineLine);
         session.data.ocrCandidateIndex += 1;
         continue;
       }
 
       const medicine = results[0];
+      console.log('\nMASTER MATCH:');
+      console.log(`candidate: ${medicineLine}`);
+      console.log(`matched product: ${medicine.suggested || medicine.name || 'null'}`);
+      console.log(`match type: ${medicine.suggested ? 'fuzzy' : 'direct'}`);
+      console.log(`confidence if fuzzy: ${typeof medicine.confidence === 'number' ? medicine.confidence : 'null'}`);
+      console.log(`active: ${medicine ? 'true' : 'false'}`);
+      console.log(`availability: ${JSON.stringify(medicine.suggested ? null : { stock: medicine.stock ?? 0 })}`);
+
       console.log('[RX] MASTER MATCH:', medicine.suggested || medicine.name || null);
       console.log('[RX] MATCH SCORE:', typeof medicine.confidence === 'number' ? medicine.confidence : 'direct');
       console.log('[RX] AVAILABILITY:', medicine.suggested ? null : {
@@ -267,11 +421,18 @@ async function processOcrCandidates(context, session) {
         return renderAmbiguousMatch(medicine);
       }
 
-      session.data.items.push(toOcrItem(medicine));
+      addOrMergeOcrItem(session, toOcrItem(medicine, candidate));
       session.data.ocrCandidateIndex += 1;
     } catch (error) {
+      console.log('\nMASTER MATCH:');
+      console.log(`candidate: ${medicineLine}`);
+      console.log('matched product: null');
+      console.log('match type: none');
+      console.log('confidence if fuzzy: null');
+      console.log('active: false');
+      console.log('availability: null');
       console.error('MATCH FAILED:', medicineLine);
-      console.error('REAL ERROR:', error);
+      console.error('REAL ERROR:', error.message || error);
       session.data.unmatchedMedicines.push(medicineLine);
       session.data.ocrCandidateIndex += 1;
     }
@@ -280,6 +441,8 @@ async function processOcrCandidates(context, session) {
   clearOcrCandidateState(session);
 
   if (!session.data.items.length) {
+    console.log('\nFINAL FLOW DECISION: Unable to identify medicines from prescription');
+    console.log('EXACT REASON: "Unable to identify medicines from prescription" (None of the extracted prescription candidates could be matched to active stock in facility ' + session.facilityId + '; unmatched: ' + JSON.stringify(session.data.unmatchedMedicines) + ')');
     session.step = STEPS.OCR_SUGGESTION;
     await context.sessionManager.saveSession(context.userId, session);
     return [
@@ -846,100 +1009,118 @@ console.log(context.media);
   );
 
   const prescriptionName =
-  parserService.extractPatientName(
-    text
-  );
+    parserService.extractPatientName(text);
   traceTiming(context, 'parser complete');
 
-console.log(
-  'PRESCRIPTION NAME:',
-  prescriptionName
-);
+  const footerAnalysis = parserService.analyzeFooterGeometry ? parserService.analyzeFooterGeometry(recognition.lines) : null;
+  const clusteredRows = parserService.clusterOcrLinesIntoRows ? parserService.clusterOcrLinesIntoRows(recognition.lines, footerAnalysis) : [];
+  const footerRows = clusteredRows.filter(r => r.isFooter);
 
-console.log(
-  'PATIENT NAME:',
-  session.data.patientName
-);
+  const medicineCandidates = parserService.extractMedicineCandidates
+    ? parserService.extractMedicineCandidates(text, recognition.lines)
+    : parserService.extractMedicines(text, recognition.lines).map((medicineText) => ({
+        rawText: medicineText,
+        medicineText,
+        prescribedQuantityText: null
+      }));
+  const medicines = medicineCandidates.map((candidate) => candidate.medicineText);
 
-if (
-  prescriptionName &&
-  session.data.patientName
-) {
-
-  const similarity =
-    stringSimilarity.compareTwoStrings(
-      prescriptionName
-        .toLowerCase()
-        .trim(),
-
-      session.data.patientName
-        .toLowerCase()
-        .trim()
+  let similarity = null;
+  if (prescriptionName && session.data.patientName) {
+    similarity = stringSimilarity.compareTwoStrings(
+      prescriptionName.toLowerCase().trim(),
+      session.data.patientName.toLowerCase().trim()
     );
+  }
+
+  console.log('=== PRESCRIPTION DEBUG START ===\n');
+  console.log('OCR RAW TEXT:\n' + text + '\n');
+  console.log('OCR STRUCTURED ITEMS:\n' + JSON.stringify(recognition.lines, null, 2) + '\n');
+  console.log('CLUSTERED OCR ROWS:\n' + JSON.stringify(clusteredRows.map(r => ({ text: r.text, isFooter: r.isFooter })), null, 2) + '\n');
+  console.log('FOOTER ANCHORS:\n' + JSON.stringify(footerAnalysis?.footerAnchors?.map(a => a.text) || [], null, 2) + '\n');
+  console.log('FOOTER CUTOFF Y:\n' + (footerAnalysis?.footerCutoffY ?? 'null') + '\n');
+  console.log('ROWS CLASSIFIED AS FOOTER:\n' + JSON.stringify(footerRows.map(r => r.text), null, 2) + '\n');
+  console.log('DETECTED PRESCRIPTION PATIENT:\n' + (prescriptionName ?? 'null') + '\n');
+  console.log('SELECTED PATIENT:\n' + (session.data.patientName ?? 'null') + '\n');
+  console.log('PATIENT MATCH/MISMATCH RESULT:\n' + (similarity !== null ? `similarity: ${similarity}, mismatch: ${similarity < 0.7}` : 'no comparison performed') + '\n');
+  console.log('EXTRACTED MEDICINE CANDIDATES:');
+  medicineCandidates.forEach(c => {
+    console.log(`\nrawText: ${c.rawText}`);
+    console.log(`medicineText: ${c.medicineText}`);
+    console.log(`dosePerAdministration: ${c.dosePerAdministration}`);
+    console.log(`frequency: ${c.frequency}`);
+    console.log(`duration: ${c.duration}`);
+    console.log(`calculatedQuantity: ${c.calculatedQuantity}`);
+    console.log(`numericQuantity: ${c.numericQuantity}`);
+    console.log(`quantitySource: ${c.quantitySource}`);
+  });
+  console.log('\n=== PRESCRIPTION DEBUG END ===\n');
 
   console.log(
-    'NAME SIMILARITY:',
-    similarity
-  );
-  traceTiming(context, 'patient comparison complete');
-
-  if (similarity < 0.7) {
-
-  session.data.prescriptionName =
-    prescriptionName;
-
-  session.data.ocrText =
-    text;
-
-  session.step =
-    STEPS.OCR_NAME_MISMATCH;
-
-  await context.sessionManager.saveSession(
-    context.userId,
-    session
+    'PRESCRIPTION NAME:',
+    prescriptionName
   );
 
-  return [
-    '❌ PATIENT NAME MISMATCH',
-    '',
-    `Entered Name: ${session.data.patientName}`,
-    `Prescription Name: ${prescriptionName}`,
-    '',
-    '1 Upload Another Prescription',
-    '',
-    '2 Change Patient Name',
-    '',
-    '0 Cancel'
-  ].join('\n');
-}
-}
+  console.log(
+    'PATIENT NAME:',
+    session.data.patientName
+  );
 
- const medicineCandidates = parserService.extractMedicineCandidates
-  ? parserService.extractMedicineCandidates(text, recognition.lines)
-  : parserService.extractMedicines(text, recognition.lines).map((medicineText) => ({
-      rawText: medicineText,
-      medicineText,
-      prescribedQuantityText: null
-    }));
- const medicines = medicineCandidates.map((candidate) => candidate.medicineText);
- console.log('[RX] MEDICINE CANDIDATES:', medicineCandidates);
- console.log('MEDICINES EXTRACTED');
- console.log(medicines);
+  if (similarity !== null) {
+    console.log(
+      'NAME SIMILARITY:',
+      similarity
+    );
+    traceTiming(context, 'patient comparison complete');
 
-if (!medicines.length) {
-  clearOcrCandidateState(session);
-  session.step = STEPS.OCR_SUGGESTION;
-  await context.sessionManager.saveSession(context.userId, session);
-  return [
-    'Unable to identify medicines from prescription',
-    '',
-    '1 Upload Another Image',
-    '',
-    '2 Manual Entry',
-    '',
-    '0 Cancel'
-  ].join('\n');
-}
+    if (similarity < 0.7) {
+      console.log('FINAL FLOW DECISION: ❌ PATIENT NAME MISMATCH');
+      console.log(`EXACT REASON: Detected patient name "${prescriptionName}" does not match selected patient "${session.data.patientName}" (similarity: ${similarity} < 0.7)`);
+      session.data.prescriptionName = prescriptionName;
+      session.data.ocrText = text;
+      session.data.ocrLines = recognition.lines;
+      session.step = STEPS.OCR_NAME_MISMATCH;
+
+      await context.sessionManager.saveSession(
+        context.userId,
+        session
+      );
+
+      return [
+        '❌ PATIENT NAME MISMATCH',
+        '',
+        `Entered Name: ${session.data.patientName}`,
+        `Prescription Name: ${prescriptionName}`,
+        '',
+        '1 Upload Another Prescription',
+        '',
+        '2 Change Patient Name',
+        '',
+        '0 Cancel'
+      ].join('\n');
+    }
+  }
+
+  console.log('[RX] MEDICINE CANDIDATES:', medicineCandidates);
+  console.log('MEDICINES EXTRACTED');
+  console.log(medicines);
+
+  if (!medicines.length) {
+    console.log('FINAL FLOW DECISION: Unable to identify medicines from prescription');
+    console.log('EXACT REASON: "Unable to identify medicines from prescription" (No medicine candidates were extracted from prescription text/OCR lines by parserService.extractMedicineCandidates)');
+    clearOcrCandidateState(session);
+    session.step = STEPS.OCR_SUGGESTION;
+    await context.sessionManager.saveSession(context.userId, session);
+    return [
+      'Unable to identify medicines from prescription',
+      '',
+      '1 Upload Another Image',
+      '',
+      '2 Manual Entry',
+      '',
+      '0 Cancel'
+    ].join('\n');
+  }
 
 session.data.items = [];
 session.data.unmatchedMedicines = [];
@@ -972,33 +1153,117 @@ case STEPS.OCR_REVIEW: {
 
   session.data.currentQuantityIndex = 0;
 
+  const firstMedicine =
+    session.data.items[0];
+
+  const hasTrusted =
+    typeof firstMedicine.quantity === 'number' && firstMedicine.quantity > 0;
+
   session.step =
-    STEPS.OCR_QUANTITY_ENTRY;
+    hasTrusted ? STEPS.OCR_QUANTITY_CONFIRMATION : STEPS.OCR_QUANTITY_OVERRIDE_ENTRY;
 
   await context.sessionManager.saveSession(
     context.userId,
     session
   );
 
-  const firstMedicine =
-    session.data.items[0];
-
- return [
-  'Enter quantity for:',
-  '',
-  firstMedicine.medicineName,
-  `Batch: ${firstMedicine.batch}`,
-  `Expiry: ${firstMedicine.expiryDate}`,
-  `Available Stock: ${firstMedicine.availableStock}`,
-  '',
-  'Enter dispense quantity:'
-].join('\n');
+  return renderQuantityPrompt(firstMedicine);
 }
 
 
+case STEPS.OCR_QUANTITY_CONFIRMATION: {
+
+  const index =
+    session.data.currentQuantityIndex;
+
+  const item =
+    session.data.items[index];
+
+  const trimmed = (text || '').trim();
+
+  const isKeep = trimmed === '1' || ['OK', 'YES', 'CONFIRM', 'KEEP'].includes(trimmed.toUpperCase());
+  if (isKeep) {
+    session.data.currentQuantityIndex++;
+
+    if (
+      session.data.currentQuantityIndex <
+      session.data.items.length
+    ) {
+      const nextItem =
+        session.data.items[
+          session.data.currentQuantityIndex
+        ];
+
+      const nextHasTrusted =
+        typeof nextItem.quantity === 'number' && nextItem.quantity > 0;
+
+      session.step =
+        nextHasTrusted ? STEPS.OCR_QUANTITY_CONFIRMATION : STEPS.OCR_QUANTITY_OVERRIDE_ENTRY;
+
+      await context.sessionManager.saveSession(
+        context.userId,
+        session
+      );
+
+      return renderQuantityPrompt(nextItem, true);
+    }
+
+    session.step =
+      STEPS.PRESCRIPTION_REVIEW;
+
+    await context.sessionManager.saveSession(
+      context.userId,
+      session
+    );
+
+    return renderDispensingSummary(session);
+  }
+
+  if (trimmed === '2') {
+    session.step =
+      STEPS.OCR_QUANTITY_OVERRIDE_ENTRY;
+
+    await context.sessionManager.saveSession(
+      context.userId,
+      session
+    );
+
+    return 'Enter quantity to dispense:';
+  }
+
+  return [
+    'Please choose:',
+    '',
+    '1 Keep this quantity',
+    '2 Enter a different quantity'
+  ].join('\n');
+}
+
+
+case STEPS.OCR_QUANTITY_OVERRIDE_ENTRY:
 case STEPS.OCR_QUANTITY_ENTRY: {
 
-  const qty = parseInt(text, 10);
+  const index =
+    session.data.currentQuantityIndex;
+
+  const item =
+    session.data.items[index];
+
+  const trimmed = (text || '').trim();
+
+  let qty;
+  if (session.step === STEPS.OCR_QUANTITY_ENTRY && typeof item.quantity === 'number' && item.quantity > 0) {
+    if (['OK', 'YES', 'CONFIRM', 'KEEP'].includes(trimmed.toUpperCase())) {
+      qty = item.quantity;
+    }
+  }
+
+  if (qty === undefined) {
+    if (!/^\d+$/.test(trimmed)) {
+      return 'Enter a valid quantity';
+    }
+    qty = parseInt(trimmed, 10);
+  }
 
   if (
     isNaN(qty) ||
@@ -1006,12 +1271,6 @@ case STEPS.OCR_QUANTITY_ENTRY: {
   ) {
     return 'Enter a valid quantity';
   }
-
-  const index =
-    session.data.currentQuantityIndex;
-
-  const item =
-    session.data.items[index];
 
   if (
     qty > item.availableStock
@@ -1033,23 +1292,18 @@ case STEPS.OCR_QUANTITY_ENTRY: {
         session.data.currentQuantityIndex
       ];
 
+    const nextHasTrusted =
+      typeof nextItem.quantity === 'number' && nextItem.quantity > 0;
+
+    session.step =
+      nextHasTrusted ? STEPS.OCR_QUANTITY_CONFIRMATION : STEPS.OCR_QUANTITY_OVERRIDE_ENTRY;
+
     await context.sessionManager.saveSession(
       context.userId,
       session
     );
 
-   return [
-  'Quantity Recorded',
-  '',
-  'Enter quantity for:',
-  '',
-  nextItem.medicineName,
-  `Batch: ${nextItem.batch}`,
-  `Expiry: ${nextItem.expiryDate}`,
-  `Available Stock: ${nextItem.availableStock}`,
-  '',
-  'Enter dispense quantity:'
-].join('\n');
+    return renderQuantityPrompt(nextItem, true);
   }
 
   session.step =
@@ -1060,27 +1314,7 @@ case STEPS.OCR_QUANTITY_ENTRY: {
     session
   );
 
-  const matched =
-    session.data.items.map(
-      (item, i) =>
-        `${i + 1}. ${item.medicineName}
-Batch: ${item.batch}
-Expiry: ${item.expiryDate}
-Qty: ${item.quantity}`
-    );
-
-  return [
-    'DISPENSING SUMMARY',
-    '',
-    ...matched.flatMap((line, index) => [
-    line,
-    ...(index < matched.length - 1 ? [''] : [])
-  ]),
-    '',
-    '1 Confirm Dispense',
-    '',
-    '2 Cancel'
-  ].join('\n');
+  return renderDispensingSummary(session);
 }
 
 
@@ -1538,17 +1772,20 @@ if (!session.data.pendingSuggestion) {
         );
     const medicine = medicines[0];
     const firstBatch = medicine.batches?.[0];
+    const candidate = Array.isArray(session.data.ocrCandidates)
+      ? session.data.ocrCandidates[suggestion.candidateIndex]
+      : null;
     const acceptedItem = toOcrItem({
       id: medicine.id,
       name: medicine.name,
       batchNumber: medicine.batchNumber || firstBatch?.batchNumber,
       expiryDate: medicine.expiryDate || firstBatch?.expiryDate,
       stock: medicine.stock ?? firstBatch?.stock
-    });
+    }, candidate);
 
     if (Array.isArray(session.data.ocrCandidates)) {
       session.data.items = session.data.items || [];
-      session.data.items.push(acceptedItem);
+      addOrMergeOcrItem(session, acceptedItem);
       session.data.pendingSuggestion = null;
       session.data.ocrCandidateIndex = suggestion.candidateIndex + 1;
       return processOcrCandidates(context, session);
@@ -1867,58 +2104,20 @@ return [
   const parserService =
     require('../services/prescriptionParserService');
 
-  const medicines =
-    parserService.extractMedicines(
-      session.data.ocrText
-    );
+  const medicineCandidates = parserService.extractMedicineCandidates
+    ? parserService.extractMedicineCandidates(session.data.ocrText, session.data.ocrLines)
+    : parserService.extractMedicines(session.data.ocrText, session.data.ocrLines).map((medicineText) => ({
+        rawText: medicineText,
+        medicineText,
+        prescribedQuantityText: null
+      }));
 
   session.data.items = [];
   session.data.unmatchedMedicines = [];
-
-  for (const medicineLine of medicines) {
-  try {
-
-      const results =
-        await dispensingService.searchMedicines(
-          medicineLine,
-          session.facilityId
-        );
-
-      if (!results.length) {
-        session.data.unmatchedMedicines.push(
-          medicineLine
-        );
-        continue;
-      }
-
-      const med = results[0];
-
-      session.data.items.push({
-        productId: med.id,
-        medicineName: med.name,
-        quantity: null,
-        batch: med.batchNumber || 'N/A',
-        expiryDate: med.expiryDate || 'N/A',
-        availableStock: med.stock || 0
-      });
-
-    } catch (err) {
-
-      session.data.unmatchedMedicines.push(
-        medicineLine
-      );
-    }
-  }
-
-  session.data.prescriptionUploaded = true;
-
-  session.step =
-    STEPS.OCR_REVIEW;
-
-  await context.sessionManager.saveSession(
-    context.userId,
-    session
-  );
+  session.data.ocrCandidates = medicineCandidates;
+  session.data.ocrCandidateIndex = 0;
+  session.data.pendingSuggestion = null;
+  return processOcrCandidates(context, session);
 
  const matched =
   session.data.items.map(
@@ -2085,5 +2284,13 @@ return 'Select 1 or 0';
 
 module.exports = {
   start,
-  handle
+  handle,
+  _testing: {
+    mergeOcrItems,
+    addOrMergeOcrItem,
+    formatQuantityToDispense,
+    renderQuantityPrompt,
+    renderDispensingSummary,
+    STEPS
+  }
 };
