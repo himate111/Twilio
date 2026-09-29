@@ -2,6 +2,7 @@ const mockSearchMedicines = jest.fn();
 const mockSearchMedicinesForLookup = jest.fn();
 const mockResolveSuggestedMedicine = jest.fn();
 const mockValidateStock = jest.fn();
+const mockDispense = jest.fn();
 const mockExtractText = jest.fn();
 const mockValidateImageFile = jest.fn();
 const mockCleanupTemporaryImage = jest.fn();
@@ -10,7 +11,8 @@ jest.mock('../src/services/dispensingService', () => ({
   searchMedicines: mockSearchMedicines,
   searchMedicinesForLookup: mockSearchMedicinesForLookup,
   resolveSuggestedMedicine: mockResolveSuggestedMedicine,
-  validateStock: mockValidateStock
+  validateStock: mockValidateStock,
+  dispense: mockDispense
 }));
 jest.mock('../src/services/imageDownloadService', () => ({
   isSupportedImageMimeType: jest.fn(() => true),
@@ -192,6 +194,25 @@ describe('dispensingFlow prescription OCR integration', () => {
     expect(reply).toContain('PRESCRIPTION ANALYSIS');
   });
 
+  test('routes a legacy OCR explicit quantity through the quantity-choice state', async () => {
+    const userId = 'whatsapp:+15551234567';
+    const actor = { facilityId: 1, userId: 10 };
+    const sessionManager = new FakeSessionManager();
+    mockExtractText.mockResolvedValue('Rx\nExampleLegacy 20mg Tablet | 10 Tablets');
+    mockSearchMedicines.mockResolvedValue([{ id: 2, name: 'Example Legacy', batchNumber: 'LEG-10', expiryDate: '2027-01-01', stock: 490 }]);
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    await dispensingFlow.handle({
+      userId, actor, sessionManager, session, text: '',
+      media: [{ path: 'uploads/legacy-quantity.jpg', contentType: 'image/jpeg' }], services: {}
+    });
+    const reply = await dispensingFlow.handle({ userId, actor, sessionManager, session, text: '1', media: [], services: {} });
+
+    expect(session.step).toBe('ocr_prescription_quantity_choice');
+    expect(session.data.items[0]).toMatchObject({ prescriptionQuantity: 10, proposedDispenseQuantity: null, quantity: null });
+    expect(reply).toContain('1 Use Prescription Quantity (10)');
+    expect(mockDispense).not.toHaveBeenCalled();
+  });
   test('keeps an unmatched prescription medicine unresolved without forcing a match', async () => {
     const userId = 'whatsapp:+15551234567';
     const actor = { facilityId: 1, userId: 10 };
@@ -207,7 +228,123 @@ describe('dispensingFlow prescription OCR integration', () => {
 
     expect(mockSearchMedicines).toHaveBeenCalledWith('Unknownmedicine 500mg Tablet', 1);
     expect(session.data.unmatchedMedicines).toEqual(['Unknownmedicine 500mg Tablet']);
+    expect(reply).toContain('⚠️ NOT FOUND IN MEDICINE MASTER');
+    expect(reply).not.toContain('Unable to identify medicines from prescription');
+    expect(reply).not.toContain('❌ MEDICINES OUT OF STOCK');
+    expect(session.data.items).toEqual([]);
+  });
+});
+
+describe('dispensingFlow OCR result states', () => {
+  const userId = 'whatsapp:+15551234567';
+  const actor = { facilityId: 1, userId: 10 };
+  const makeContext = (sessionManager, session) => ({
+    userId,
+    actor,
+    sessionManager,
+    session,
+    text: '',
+    media: [{ path: 'uploads/synthetic-prescription.jpg', contentType: 'image/jpeg' }],
+    services: {}
+  });
+  const available = (id, name) => ({
+    id,
+    name,
+    batchNumber: `${id}-batch`,
+    expiryDate: '2027-01-01',
+    stock: 10
+  });
+  const fiveSyntheticCandidates = [
+    '1. AtlasMed 10mg Tablet',
+    '2. BirchMed 20mg Tablet',
+    '3. CedarMed 30mg Tablet',
+    '4. DeltaMed 40mg Tablet',
+    '5. EmberMed 50mg Tablet'
+  ].join('\n');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('keeps the existing no-candidate response when no medicines are parsed', async () => {
+    mockExtractText.mockResolvedValue('');
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    const reply = await dispensingFlow.handle(makeContext(sessionManager, session));
+
     expect(reply).toContain('Unable to identify medicines from prescription');
+    expect(reply).not.toContain('NOT FOUND IN MEDICINE MASTER');
+    expect(mockSearchMedicines).not.toHaveBeenCalled();
+  });
+
+  test('shows parsed candidates as not found in Master when none match', async () => {
+    mockExtractText.mockResolvedValue(fiveSyntheticCandidates);
+    mockSearchMedicines.mockResolvedValue([]);
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    const reply = await dispensingFlow.handle(makeContext(sessionManager, session));
+
+    expect(reply).toContain('PRESCRIPTION ANALYSIS');
+    expect(reply).toContain('⚠️ NOT FOUND IN MEDICINE MASTER');
+    expect(reply).toContain('These medicines were read from the prescription but could not be matched to Medicine Master.');
+    expect(reply).toContain('AtlasMed 10mg Tablet');
+    expect(reply).toContain('EmberMed 50mg Tablet');
+    expect(reply).not.toContain('Unable to identify medicines from prescription');
+    expect(reply).not.toContain('❌ MEDICINES OUT OF STOCK');
+    expect(session.data.items).toEqual([]);
+    expect(session.data.unmatchedMedicines).toHaveLength(5);
+    expect(session.data.unavailableMedicines).toEqual([]);
+  });
+
+  test('separates available Master matches from parsed-but-unmatched candidates', async () => {
+    mockExtractText.mockResolvedValue(fiveSyntheticCandidates);
+    mockSearchMedicines
+      .mockResolvedValueOnce([available('atlas', 'Catalog Atlas')])
+      .mockResolvedValueOnce([available('birch', 'Catalog Birch')])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    const reply = await dispensingFlow.handle(makeContext(sessionManager, session));
+
+    expect(reply).toContain('✅ MEDICINES IN STOCK');
+    expect(reply).toContain('Catalog Atlas');
+    expect(reply).toContain('Catalog Birch');
+    expect(reply).toContain('⚠️ NOT FOUND IN MEDICINE MASTER');
+    expect(reply).toContain('CedarMed 30mg Tablet');
+    expect(reply).toContain('DeltaMed 40mg Tablet');
+    expect(reply).toContain('EmberMed 50mg Tablet');
+    expect(reply).not.toContain('❌ MEDICINES OUT OF STOCK');
+    expect(session.data.items.map((item) => item.medicineName)).toEqual([
+      'Catalog Atlas',
+      'Catalog Birch'
+    ]);
+    expect(session.data.unmatchedMedicines).toEqual([
+      'CedarMed 30mg Tablet',
+      'DeltaMed 40mg Tablet',
+      'EmberMed 50mg Tablet'
+    ]);
+  });
+
+  test('shows out of stock only for a Master match whose availability check failed', async () => {
+    mockExtractText.mockResolvedValue('UnavailableMed 10mg Tablet');
+    mockSearchMedicines.mockRejectedValue(new Error('Medicine out of stock.'));
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    const reply = await dispensingFlow.handle(makeContext(sessionManager, session));
+
+    expect(reply).toContain('❌ MEDICINES OUT OF STOCK');
+    expect(reply).toContain('UnavailableMed 10mg Tablet');
+    expect(reply).not.toContain('NOT FOUND IN MEDICINE MASTER');
+    expect(reply).not.toContain('Unable to identify medicines from prescription');
+    expect(session.data.unavailableMedicines).toEqual(['UnavailableMed 10mg Tablet']);
+    expect(session.data.unmatchedMedicines).toEqual([]);
+    expect(session.data.items).toEqual([]);
   });
 });
 
@@ -530,7 +667,7 @@ describe('dispensingFlow quantity integration', () => {
     jest.clearAllMocks();
   });
 
-  test('Paracetamol with 5-day direction gets calculatedQuantity 15 pre-filled in session item', async () => {
+  test('direction-derived metadata remains non-proposed and requires manual quantity entry', async () => {
     mockExtractText.mockResolvedValue(
       'Paracetamol 500mg\nTake 1 tablet three times daily for 5 days.'
     );
@@ -551,14 +688,16 @@ describe('dispensingFlow quantity integration', () => {
     ));
 
     expect(reply).toContain('PRESCRIPTION ANALYSIS');
-    expect(reply).toContain('Quantity to dispense: 15 tablets');
+    expect(reply).toContain('Quantity to dispense: Enter manually');
 
     expect(session.data.items).toHaveLength(1);
     const item = session.data.items[0];
     expect(item.medicineName).toBe('Paracetamol');
     expect(item.calculatedQuantity).toBe(15);
     expect(item.quantitySource).toBe('calculated_from_directions');
-    expect(item.quantity).toBe(15);
+    expect(item.prescriptionQuantity).toBeNull();
+    expect(item.proposedDispenseQuantity).toBeNull();
+    expect(item.quantity).toBeNull();
   });
 
   test('Amlodipine without duration gets quantitySource manual_input_required and no pre-fill', async () => {
@@ -623,7 +762,7 @@ describe('dispensingFlow quantity integration', () => {
     expect(reply).not.toContain('Quantity Source:');
   });
 
-  test('OCR analysis message includes simplified "Quantity to dispense:" for each item', async () => {
+  test('OCR analysis does not present a direction-derived quantity as a dispense proposal', async () => {
     mockExtractText.mockResolvedValue(
       'Paracetamol 500mg\nTake 1 tablet three times daily for 5 days.'
     );
@@ -643,7 +782,7 @@ describe('dispensingFlow quantity integration', () => {
       [{ path: 'uploads/para-analysis.jpg', contentType: 'image/jpeg' }]
     ));
 
-    expect(reply).toContain('Quantity to dispense: 15 tablets');
+    expect(reply).toContain('Quantity to dispense: Enter manually');
     expect(reply).not.toContain('Prescribed quantity:');
     expect(reply).not.toContain('Quantity source:');
   });
@@ -779,7 +918,8 @@ describe('dispensingFlow quantity integration', () => {
     const [para, aml] = session.data.items;
     expect(para.medicineName).toBe('Paracetamol');
     expect(para.calculatedQuantity).toBe(15);
-    expect(para.quantity).toBe(15);
+    expect(para.quantity).toBeNull();
+    expect(para.prescriptionQuantity).toBeNull();
     expect(aml.medicineName).toBe('Amlodipine');
     expect(aml.quantitySource).toBe('manual_input_required');
     expect(aml.quantity).toBeNull();
@@ -853,12 +993,12 @@ describe('dispensingFlow product deduplication and metadata merge', () => {
     expect(prompt).not.toContain('Prefilled Quantity:');
   });
 
-  test('formatQuantityToDispense returns prescribedQuantityText when present', () => {
-    expect(formatQuantityToDispense({ prescribedQuantityText: '2 sachets' })).toBe('2 sachets');
+  test('formatQuantityToDispense does not present prescription text as a proposed quantity', () => {
+    expect(formatQuantityToDispense({ prescribedQuantityText: '2 sachets' })).toBe('Enter manually');
   });
 
-  test('formatQuantityToDispense returns calculatedQuantity with tablets suffix', () => {
-    expect(formatQuantityToDispense({ calculatedQuantity: 60 })).toBe('60 tablets');
+  test('formatQuantityToDispense does not present direction-derived quantity as a proposal', () => {
+    expect(formatQuantityToDispense({ calculatedQuantity: 60 })).toBe('Enter manually');
   });
 
   test('formatQuantityToDispense returns Enter manually when no quantity is present', () => {
@@ -1073,7 +1213,8 @@ describe('dispensingFlow product deduplication and metadata merge', () => {
 
       expect(session.data.items).toHaveLength(4);
       expect(session.data.items[0].medicineName).toBe('Paracetamol 500mg');
-      expect(session.data.items[0].quantity).toBe(15);
+      expect(session.data.items[0].quantity).toBeNull();
+      expect(session.data.items[0].prescriptionQuantity).toBeNull();
       expect(session.data.items[0].quantitySource).toBe('calculated_from_directions');
 
       expect(session.data.items[1].medicineName).toBe('Amlodipine 5mg');
@@ -1081,18 +1222,19 @@ describe('dispensingFlow product deduplication and metadata merge', () => {
       expect(session.data.items[1].quantitySource).toBe('manual_input_required');
 
       expect(session.data.items[2].medicineName).toBe('Zinc Sulphate 20mg');
-      expect(session.data.items[2].quantity).toBe(14);
+      expect(session.data.items[2].quantity).toBeNull();
+      expect(session.data.items[2].prescriptionQuantity).toBeNull();
       expect(session.data.items[2].quantitySource).toBe('calculated_from_directions');
 
       expect(session.data.items[3].medicineName).toBe('Artemether/Lumefantrine');
-      expect(session.data.items[3].quantity).toBe(24);
+      expect(session.data.items[3].quantity).toBeNull();
+      expect(session.data.items[3].prescriptionQuantity).toBeNull();
       expect(session.data.items[3].quantitySource).toBe('calculated_from_directions');
 
-      // Verify analysis output includes simplified quantity display
-      expect(reply).toContain('Quantity to dispense: 15 tablets');
+      // Verify analysis output does not promote schedule-derived quantities
       expect(reply).toContain('Quantity to dispense: Enter manually');
-      expect(reply).toContain('Quantity to dispense: 14 tablets');
-      expect(reply).toContain('Quantity to dispense: 24 tablets');
+      expect(reply).not.toContain('Quantity to dispense: 14 tablets');
+      expect(reply).not.toContain('Quantity to dispense: 24 tablets');
       expect(reply).not.toContain('Prescribed quantity:');
       expect(reply).not.toContain('Quantity source:');
     } finally {
@@ -1423,5 +1565,279 @@ describe('dispensingFlow product deduplication and metadata merge', () => {
       expect(session.step).toBe(STEPS.OCR_QUANTITY_OVERRIDE_ENTRY);
       expect(session.data.items[0].quantity).toBe(60);
     });
+  });
+});
+
+describe('dispensingFlow Phase 3 Layout extraction mode', () => {
+  const userId = 'whatsapp:+15551234567';
+  const actor = { facilityId: 1, userId: 10 };
+  let priorMode;
+
+  function layoutCandidate(overrides = {}) {
+    return {
+      rawText: 'synthetic layout candidate',
+      medicineText: 'ExampleDrug 20 mg Tablet',
+      prescribedQuantityText: null,
+      calculatedQuantity: null,
+      explicitQuantity: null,
+      quantitySource: 'manual_input_required',
+      sourceEvidence: { sourceType: 'geometry', references: [{ kind: 'line' }] },
+      fieldEvidence: { medicineName: [{ kind: 'line' }], strength: [{ kind: 'line' }], dosageForm: [{ kind: 'line' }], quantity: [], instructions: [{ kind: 'line' }] },
+      extractionConfidence: { level: 'medium', score: 0.72, signals: ['geometryRow', 'identitySignal', 'alignedSeries'] },
+      ...overrides
+    };
+  }
+
+  function uploadContext(sessionManager, session, prescriptionLayoutExtractionService) {
+    return {
+      userId,
+      actor,
+      sessionManager,
+      session,
+      text: '',
+      media: [{ path: 'uploads/layout-synthetic.jpg', contentType: 'image/jpeg' }],
+      services: { prescriptionLayoutExtractionService }
+    };
+  }
+
+  beforeEach(() => {
+    priorMode = process.env.PRESCRIPTION_EXTRACTION_MODE;
+    process.env.PRESCRIPTION_EXTRACTION_MODE = 'layout';
+    jest.clearAllMocks();
+    mockExtractText.mockResolvedValue('Rx');
+  });
+
+  afterEach(() => {
+    if (priorMode === undefined) delete process.env.PRESCRIPTION_EXTRACTION_MODE;
+    else process.env.PRESCRIPTION_EXTRACTION_MODE = priorMode;
+    jest.restoreAllMocks();
+  });
+
+  test('uses validated Layout candidates and does not invoke the legacy medicine parser', async () => {
+    const parserService = require('../src/services/prescriptionParserService');
+    const parserSpy = jest.spyOn(parserService, 'extractMedicineCandidates');
+    const layoutService = { extract: jest.fn().mockResolvedValue({ candidates: [layoutCandidate()], rejectedCount: 2 }) };
+    mockSearchMedicines.mockResolvedValue([{ id: 11, name: 'Catalog Example', batchNumber: 'E1', expiryDate: '2027-01-01', stock: 12 }]);
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    const reply = await dispensingFlow.handle(uploadContext(sessionManager, session, layoutService));
+
+    expect(layoutService.extract).toHaveBeenCalledWith('uploads/layout-synthetic.jpg');
+    expect(parserSpy).not.toHaveBeenCalled();
+    expect(mockSearchMedicines).toHaveBeenCalledWith('ExampleDrug 20 mg Tablet', 1);
+    expect(mockValidateStock).not.toHaveBeenCalled();
+    expect(reply).toContain('Catalog Example');
+  });
+
+  test('keeps Layout-unmatched candidates in the existing not-found state', async () => {
+    const layoutService = { extract: jest.fn().mockResolvedValue({ candidates: [layoutCandidate()], rejectedCount: 0 }) };
+    mockSearchMedicines.mockResolvedValue([]);
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    const reply = await dispensingFlow.handle(uploadContext(sessionManager, session, layoutService));
+
+    expect(reply).toContain('NOT FOUND IN MEDICINE MASTER');
+    expect(reply).toContain('ExampleDrug 20 mg Tablet');
+    expect(reply).not.toContain('Unable to identify medicines from prescription');
+    expect(session.data.items).toEqual([]);
+  });
+
+  test('does not auto-dispense an ambiguous Master result because Layout confidence is high', async () => {
+    const layoutService = { extract: jest.fn().mockResolvedValue({
+      candidates: [layoutCandidate({ extractionConfidence: { level: 'high', score: 0.99, signals: ['geometryRow', 'identitySignal', 'alignedSeries'] } })],
+      rejectedCount: 0
+    }) };
+    mockSearchMedicines.mockResolvedValue([{ id: 12, name: 'Possible Example', suggested: true }]);
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    await dispensingFlow.handle(uploadContext(sessionManager, session, layoutService));
+
+    expect(session.step).toBe('ocr_suggestion');
+    expect(session.data.items).toEqual([]);
+    expect(session.data.pendingSuggestion).toEqual(expect.objectContaining({ name: 'Possible Example' }));
+  });
+
+  test('preserves explicit package quantity without converting it into an automatic dispensing quantity', async () => {
+    const layoutService = { extract: jest.fn().mockResolvedValue({
+      candidates: [layoutCandidate({ prescribedQuantityText: '10', explicitQuantity: 10, numericQuantity: 10, quantitySource: 'prescription_explicit' })],
+      rejectedCount: 0
+    }) };
+    mockSearchMedicines.mockResolvedValue([{ id: 13, name: 'Catalog Example', batchNumber: 'E1', expiryDate: '2027-01-01', stock: 12 }]);
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    await dispensingFlow.handle(uploadContext(sessionManager, session, layoutService));
+
+    expect(session.data.items[0]).toMatchObject({ prescribedQuantityText: '10', prescriptionQuantity: 10, quantity: null, quantitySource: 'prescription_explicit' });
+  });
+
+  test('routes a Layout explicit quantity through the same quantity-choice state', async () => {
+    const layoutService = { extract: jest.fn().mockResolvedValue({
+      candidates: [layoutCandidate({ prescribedQuantityText: '10', explicitQuantity: 10, numericQuantity: 10, quantitySource: 'prescription_explicit' })],
+      rejectedCount: 0
+    }) };
+    mockSearchMedicines.mockResolvedValue([{ id: 14, name: 'Catalog Example', batchNumber: 'E1', expiryDate: '2027-01-01', stock: 12 }]);
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    await dispensingFlow.handle(uploadContext(sessionManager, session, layoutService));
+    const reply = await dispensingFlow.handle({ ...uploadContext(sessionManager, session, layoutService), text: '1', media: [] });
+
+    expect(session.step).toBe('ocr_prescription_quantity_choice');
+    expect(session.data.items[0]).toMatchObject({ prescriptionQuantity: 10, proposedDispenseQuantity: null, quantity: null });
+    expect(reply).toContain('1 Use Prescription Quantity (10)');
+    expect(mockDispense).not.toHaveBeenCalled();
+  });
+  test('uses the safe manual-review path on Layout extraction failure without legacy parser fallback', async () => {
+    const parserService = require('../src/services/prescriptionParserService');
+    const parserSpy = jest.spyOn(parserService, 'extractMedicineCandidates');
+    const layoutService = { extract: jest.fn().mockRejectedValue({ code: 'AZURE_TIMEOUT' }) };
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: 'prescription_upload', data: { patientName: '', items: [] } };
+
+    const reply = await dispensingFlow.handle(uploadContext(sessionManager, session, layoutService));
+
+    expect(parserSpy).not.toHaveBeenCalled();
+    expect(mockSearchMedicines).not.toHaveBeenCalled();
+    expect(reply).toContain('Unable to identify medicines from prescription');
+    expect(reply).toContain('1 Upload Another Image');
+    expect(reply).toContain('2 Manual Entry');
+    expect(session.step).toBe('ocr_suggestion');
+  });
+});
+describe('dispensingFlow explicit prescription quantity choice', () => {
+  const userId = 'whatsapp:+15551234567';
+  const actor = { facilityId: 1, userId: 10 };
+  const { STEPS } = dispensingFlow._testing;
+
+  function context(sessionManager, session, text) {
+    return { userId, actor, sessionManager, session, text, media: [], services: {} };
+  }
+
+  function explicitItem(overrides = {}) {
+    return {
+      medicineName: 'ExampleDrug',
+      batch: 'EX-10',
+      expiryDate: '2027-01-01',
+      availableStock: 490,
+      prescriptionQuantity: 10,
+      prescriptionQuantityText: '10',
+      prescriptionQuantitySource: 'explicit_prescription_quantity',
+      manuallyEnteredQuantity: null,
+      proposedDispenseQuantity: null,
+      quantity: null,
+      ...overrides
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('shows a choice for an explicit prescription quantity without proposing it yet', async () => {
+    const sessionManager = new FakeSessionManager();
+    const item = explicitItem();
+    const session = { facilityId: 1, step: STEPS.OCR_REVIEW, data: { currentQuantityIndex: 0, items: [item] } };
+
+    const reply = await dispensingFlow.handle(context(sessionManager, session, '1'));
+
+    expect(session.step).toBe(STEPS.OCR_PRESCRIPTION_QUANTITY_CHOICE);
+    expect(reply).toContain('Prescription Quantity: 10');
+    expect(reply).toContain('1 Use Prescription Quantity (10)');
+    expect(reply).toContain('2 Enter Quantity Manually');
+    expect(reply).toContain('0 Cancel');
+    expect(reply).not.toContain('Enter quantity:');
+    expect(item.proposedDispenseQuantity).toBeNull();
+    expect(item.quantity).toBeNull();
+    expect(mockDispense).not.toHaveBeenCalled();
+  });
+
+  test('selecting use applies the captured quantity as a proposal without inventory mutation', async () => {
+    const sessionManager = new FakeSessionManager();
+    const item = explicitItem();
+    const session = { facilityId: 1, step: STEPS.OCR_PRESCRIPTION_QUANTITY_CHOICE, data: { currentQuantityIndex: 0, items: [item] } };
+
+    const reply = await dispensingFlow.handle(context(sessionManager, session, '1'));
+
+    expect(item).toMatchObject({
+      prescriptionQuantity: 10,
+      manuallyEnteredQuantity: null,
+      proposedDispenseQuantity: 10,
+      quantity: 10,
+      availableStock: 490
+    });
+    expect(reply).toContain('DISPENSING SUMMARY');
+    expect(reply).not.toContain('Enter quantity:');
+    expect(mockDispense).not.toHaveBeenCalled();
+    expect(item.availableStock).toBe(490);
+  });
+
+  test('manual selection preserves the prescription quantity and safely overrides only the proposal', async () => {
+    const sessionManager = new FakeSessionManager();
+    const item = explicitItem();
+    const session = { facilityId: 1, step: STEPS.OCR_PRESCRIPTION_QUANTITY_CHOICE, data: { currentQuantityIndex: 0, items: [item] } };
+
+    await expect(dispensingFlow.handle(context(sessionManager, session, '2'))).resolves.toBe('Enter quantity:');
+    expect(session.step).toBe(STEPS.OCR_QUANTITY_OVERRIDE_ENTRY);
+    expect(item.prescriptionQuantity).toBe(10);
+    expect(item.proposedDispenseQuantity).toBeNull();
+
+    const reply = await dispensingFlow.handle(context(sessionManager, session, '7'));
+
+    expect(item).toMatchObject({
+      prescriptionQuantity: 10,
+      manuallyEnteredQuantity: 7,
+      proposedDispenseQuantity: 7,
+      quantity: 7,
+      availableStock: 490
+    });
+    expect(reply).toContain('DISPENSING SUMMARY');
+    expect(mockDispense).not.toHaveBeenCalled();
+  });
+
+  test('null prescription quantity and schedule metadata both go directly to manual entry', async () => {
+    const sessionManager = new FakeSessionManager();
+    const item = explicitItem({
+      prescriptionQuantity: null,
+      prescriptionQuantityText: null,
+      calculatedQuantity: 9,
+      quantity: null
+    });
+    const session = { facilityId: 1, step: STEPS.OCR_REVIEW, data: { currentQuantityIndex: 0, items: [item] } };
+
+    const reply = await dispensingFlow.handle(context(sessionManager, session, '1'));
+
+    expect(session.step).toBe(STEPS.OCR_QUANTITY_OVERRIDE_ENTRY);
+    expect(reply).toContain('Enter quantity:');
+    expect(reply).not.toContain('Use Prescription Quantity');
+    expect(item.proposedDispenseQuantity).toBeNull();
+    expect(item.quantity).toBeNull();
+  });
+
+  test('rejects insufficient prescription quantity without changing the proposal or stock', async () => {
+    const sessionManager = new FakeSessionManager();
+    const item = explicitItem({ prescriptionQuantity: 10, availableStock: 5 });
+    const session = { facilityId: 1, step: STEPS.OCR_PRESCRIPTION_QUANTITY_CHOICE, data: { currentQuantityIndex: 0, items: [item] } };
+
+    await expect(dispensingFlow.handle(context(sessionManager, session, '1'))).resolves.toBe('Only 5 available');
+
+    expect(session.step).toBe(STEPS.OCR_PRESCRIPTION_QUANTITY_CHOICE);
+    expect(item.proposedDispenseQuantity).toBeNull();
+    expect(item.quantity).toBeNull();
+    expect(item.availableStock).toBe(5);
+    expect(mockDispense).not.toHaveBeenCalled();
+  });
+
+  test('cancel follows existing cancellation behavior before final confirmation', async () => {
+    const sessionManager = new FakeSessionManager();
+    const session = { facilityId: 1, step: STEPS.OCR_PRESCRIPTION_QUANTITY_CHOICE, data: { currentQuantityIndex: 0, items: [explicitItem()] } };
+
+    await dispensingFlow.handle(context(sessionManager, session, '0'));
+
+    await expect(sessionManager.getSession(userId)).resolves.toBeNull();
+    expect(mockDispense).not.toHaveBeenCalled();
   });
 });

@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
+    "benchmark:prescription-ocr": "node scripts/benchmark-prescription-ocr.js",
     "check": "node --check src/server.js"
   },
   "engines": {

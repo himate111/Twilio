@@ -4,10 +4,24 @@ const path = require('path');
 const readline = require('readline');
 const { randomUUID } = require('crypto');
 const Tesseract = require('tesseract.js');
+const { AzureDocumentIntelligenceClient, AzureDocumentIntelligenceLayoutClient } = require('./azureDocumentIntelligenceService');
+const { createLayoutShadowRunner, isLayoutShadowEnabled, isLayoutDebugEnabled } = require('./prescriptionLayoutShadowService');
+const { resolvePrescriptionExtractionMode } = require('./prescriptionLayoutExtractionService');
 
 const ENGINE = 'paddle-ocr-v6';
 const DETECTOR_MODEL = 'PP-OCRv6_small_det';
+
+function resolveOcrProvider(value = process.env.PRESCRIPTION_OCR_PROVIDER) {
+  return String(value || '').trim().toLowerCase() === 'azure' ? 'azure' : 'paddle';
+}
 const RECOGNIZER_MODEL = 'PP-OCRv6_small_rec';
+
+function ocrErrorCategory(error, provider) {
+  const code = String(error?.code || '').toUpperCase();
+  if (code.startsWith('AZURE_')) return code;
+  if (code.includes('TIMEOUT') || /timeout/i.test(String(error?.message || ''))) return `${provider.toUpperCase()}_TIMEOUT`;
+  return `${provider.toUpperCase()}_FAILED`;
+}
 
 function resolvePythonPath(root = process.cwd(), environment = process.env) {
   if (environment.OCR_PYTHON_PATH) return environment.OCR_PYTHON_PATH;
@@ -80,7 +94,7 @@ class PaddleOcrWorker {
         this.pending.delete(message.id);
         message.error ? request.reject(new Error(message.error)) : request.resolve(message);
       });
-      child.stderr.on('data', chunk => console.error(`[paddle-ocr] ${String(chunk).trim()}`));
+      child.stderr.on('data', () => console.error('[PRESCRIPTION OCR] PaddleOCR worker diagnostic received'));
       child.once('error', error => { this.reset(child); settle(reject, error); });
       child.once('exit', code => {
         const error = new Error(`Paddle OCR worker exited (${code ?? 'unknown'})`);
@@ -128,29 +142,66 @@ class PaddleOcrWorker {
 }
 
 async function recognizeWithTesseract(imagePath, tesseract = Tesseract) {
-  const { data = {} } = await tesseract.recognize(imagePath, 'eng', { logger: () => {} });
-  return {
-    engine: 'tesseract', text: data.text || '', confidence: data.confidence || 0,
-    lines: (data.lines || []).map(line => ({ text: line.text, confidence: line.confidence })),
-    warnings: ['Paddle OCR was unavailable; Tesseract fallback was used.']
-  };
+  const startedAt = Date.now();
+  console.log('[PRESCRIPTION OCR] Tesseract attempt started');
+  try {
+    const { data = {} } = await tesseract.recognize(imagePath, 'eng', { logger: () => {} });
+    console.log(`[PRESCRIPTION OCR] Tesseract succeeded durationMs=${Date.now() - startedAt}`);
+    return { engine: 'tesseract', text: data.text || '', confidence: data.confidence || 0, lines: (data.lines || []).map(line => ({ text: line.text, confidence: line.confidence })), warnings: ['Paddle OCR was unavailable; Tesseract fallback was used.'] };
+  } catch (error) {
+    console.error(`[PRESCRIPTION OCR] Tesseract failed category=${ocrErrorCategory(error, 'tesseract')} durationMs=${Date.now() - startedAt}`);
+    throw error;
+  }
 }
 
 function createOcrService(options = {}) {
+  const environment = options.environment || process.env;
   const worker = options.worker || new PaddleOcrWorker(options);
   const fallback = options.tesseractRecognize || (imagePath => recognizeWithTesseract(imagePath));
-  async function recognize(imagePath) {
-    try { return await worker.recognize(imagePath); }
-    catch (error) {
-      console.error('[paddle-ocr] Primary OCR failed; using Tesseract fallback', error.message);
-      return fallback(imagePath);
-    }
+  const provider = resolveOcrProvider(environment.PRESCRIPTION_OCR_PROVIDER);
+  const azureClient = options.azureClient || new AzureDocumentIntelligenceClient({ environment });
+  const extractionMode = resolvePrescriptionExtractionMode(environment.PRESCRIPTION_EXTRACTION_MODE);
+  const layoutShadowEnabled = extractionMode === 'legacy'
+    && isLayoutShadowEnabled(environment.PRESCRIPTION_LAYOUT_SHADOW_ENABLED);
+  const layoutShadowClient = layoutShadowEnabled
+    ? (options.layoutShadowClient || new AzureDocumentIntelligenceLayoutClient({ environment }))
+    : null;
+  const runLayoutShadow = createLayoutShadowRunner({
+    enabled: layoutShadowEnabled,
+    client: layoutShadowClient,
+    logger: options.shadowLogger,
+    extractor: options.layoutShadowExtractor,
+    debugEnabled: isLayoutDebugEnabled(environment)
+  });
+  async function recognizeWithPaddle(imagePath) {
+    const startedAt = Date.now();
+    console.log('[PRESCRIPTION OCR] PaddleOCR attempt started');
+    try { const recognition = await worker.recognize(imagePath); console.log(`[PRESCRIPTION OCR] PaddleOCR succeeded durationMs=${Date.now() - startedAt}`); return recognition; }
+    catch (error) { console.error(`[PRESCRIPTION OCR] PaddleOCR failed category=${ocrErrorCategory(error, 'paddle')} durationMs=${Date.now() - startedAt}`); return fallback(imagePath); }
   }
-  return { recognize, extractText: async imagePath => (await recognize(imagePath)).text, shutdown: () => worker.shutdown(), worker };
+  async function recognize(imagePath) {
+    const layoutShadowPromise = layoutShadowEnabled ? runLayoutShadow(imagePath) : null;
+    if (layoutShadowPromise) {
+      void layoutShadowPromise.catch(() => {
+        console.error('[PRESCRIPTION SHADOW] layout failed category=LAYOUT_FAILED');
+      });
+    }
+    const startedAt = Date.now();
+    let recognition;
+    if (provider === 'azure') {
+      const azureStartedAt = Date.now(); console.log('[PRESCRIPTION OCR] Azure attempt started');
+      try { recognition = await azureClient.recognize(imagePath); console.log(`[PRESCRIPTION OCR] Azure succeeded durationMs=${Date.now() - azureStartedAt}`); }
+      catch (error) { console.error(`[PRESCRIPTION OCR] Azure failed category=${ocrErrorCategory(error, 'azure')} durationMs=${Date.now() - azureStartedAt}`); recognition = await recognizeWithPaddle(imagePath); }
+    } else { recognition = await recognizeWithPaddle(imagePath); }
+    console.log(`[PRESCRIPTION OCR] provider used: ${recognition.engine || 'unknown'}`);
+    console.log(`[PRESCRIPTION OCR] recognition duration: ${Date.now() - startedAt}ms`);
+    return recognition;
+  }
+  return { recognize, extractText: async imagePath => (await recognize(imagePath)).text, shutdown: () => worker.shutdown(), worker, provider, azureClient, layoutShadowEnabled };
 }
 
 const service = createOcrService();
 process.once('SIGINT', () => service.shutdown());
 process.once('SIGTERM', () => service.shutdown());
 
-module.exports = { ...service, ENGINE, DETECTOR_MODEL, RECOGNIZER_MODEL, PaddleOcrWorker, createOcrService, recognizeWithTesseract, resolvePythonPath };
+module.exports = { ...service, ENGINE, DETECTOR_MODEL, RECOGNIZER_MODEL, PaddleOcrWorker, createOcrService, recognizeWithTesseract, resolvePythonPath };module.exports.resolveOcrProvider = resolveOcrProvider;

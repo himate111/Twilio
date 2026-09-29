@@ -222,11 +222,7 @@ async function findMedicineFuzzy(query, options = {}) {
       (1 - (best.score || 0)) * 100
     );
 
-  console.log(
-    'FUSE MATCH:',
-    medicine.medicineName,
-    confidence + '%'
-  );
+  console.log(`[PRESCRIPTION OCR] fuzzy match confidence=${confidence}`);
 
   if (confidence < 40) {
     return null;

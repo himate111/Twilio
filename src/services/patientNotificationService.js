@@ -26,11 +26,6 @@ const finalPhone =
     ? normalizedPhone
     : `91${normalizedPhone}`;
 
-console.log(
-  'Sending WhatsApp to:',
-  `whatsapp:+${finalPhone}`
-);
-
 return client.messages.create({
   from: env.twilio.whatsappFrom,
   to: `whatsapp:+${finalPhone}`,

@@ -192,8 +192,6 @@ async function buildReply(incoming) {
   const actor = await inventoryService.resolveActor(incoming.from);
   const session = await sessionManager.getSession(incoming.from);
 
-  console.log('ACTOR:', actor);
-console.log('SESSION:', session);
 
   // account lock check
   if (actor.lockedUntil && new Date(actor.lockedUntil) > new Date()) {
@@ -243,15 +241,6 @@ if (!session || !session.authenticated) {
     return 'Prescription is being processed. Please wait for the result before sending another reply.';
   }
 
-console.log(
-  'CURRENT FLOW:',
-  session?.flow
-);
-
-console.log(
-  'CURRENT STEP:',
-  session?.step
-);
 
   if (session.flow) {
     return dispatchActiveFlow(baseContext);
@@ -276,7 +265,7 @@ async function processPrescriptionAsync(incoming, session, startedAt) {
   try {
     const currentSession = await sessionManager.getSession(incoming.from);
     if (!currentSession || currentSession.prescriptionProcessing?.messageSid !== expectedMessageSid) {
-      console.log(`[RX TIMING] async processing skipped elapsedMs=${Date.now() - startedAt} reason=session_changed`);
+      console.log(`[PRESCRIPTION OCR] async processing skipped elapsedMs=${Date.now() - startedAt} reason=session_changed`);
       return;
     }
 
@@ -294,15 +283,15 @@ async function processPrescriptionAsync(incoming, session, startedAt) {
     await sessionManager.completeMessageProcessing(expectedMessageSid, response);
     traceTiming('response sent');
   } catch (error) {
-    console.error('[RX] asynchronous prescription processing failed:', error);
+    console.error('[PRESCRIPTION OCR] asynchronous processing failed category=PROCESSING_FAILED');
 
     try {
       const safeResponse = 'Unable to read that prescription image. Please upload a clear JPEG or PNG image.';
       await sendMessagesSequentially(incoming.from, [safeResponse]);
       await sessionManager.completeMessageProcessing(expectedMessageSid, safeResponse);
-      console.log(`[RX TIMING] response sent elapsedMs=${Date.now() - startedAt} fallback=true`);
+      console.log(`[PRESCRIPTION OCR] response sent elapsedMs=${Date.now() - startedAt} fallback=true`);
     } catch (sendError) {
-      console.error('[RX] unable to send asynchronous prescription failure response:', sendError);
+      console.error('[PRESCRIPTION OCR] asynchronous failure response could not be sent category=OUTBOUND_SEND_FAILED');
     }
   }
 }
@@ -312,12 +301,6 @@ async function handleWhatsappWebhook(req, res, next) {
     const startedAt = Date.now();
     const traceTiming = createTimingLogger(startedAt);
     traceTiming('webhook received');
-    console.log('TWILIO WEBHOOK HIT');
-    console.log(req.body);
-
-
-
-    console.log('FILE:', req.file);
 
 const media = [];
 
@@ -338,7 +321,6 @@ for (let i = 0; i < numMedia; i++) {
   });
 }
 
-console.log('MEDIA RECEIVED:', media);
 
 const incoming = {
   from: req.body.From.replace('whatsapp:', ''),
@@ -365,7 +347,7 @@ const incoming = {
       traceTiming('webhook acknowledged');
 
       if (!acquired) {
-        console.log(`[RX TIMING] duplicate prescription ignored elapsedMs=${Date.now() - startedAt} messageSid=${incoming.messageSid}`);
+        console.log(`[PRESCRIPTION OCR] duplicate prescription ignored elapsedMs=${Date.now() - startedAt}`);
         return;
       }
 
@@ -387,8 +369,6 @@ const incoming = {
 
     const botResponse = await buildReply(incoming);
     traceTiming('response generated');
-
-    console.log('BOT RESPONSE:', botResponse);
 
     if (dryRun) {
       const messages = Array.isArray(botResponse)

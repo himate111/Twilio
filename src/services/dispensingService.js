@@ -38,15 +38,6 @@ async function getMedicineBatches(
 
 
 async function resolveMedicineAvailability(medicine, facilityId) {
-  console.log(
-    'USER FACILITY:',
-    facilityId
-  );
-  console.log(
-    'MEDICINE ID:',
-    medicine.id
-  );
-
   const stock = await inventoryService.getAvailableStock(
     medicine.id,
     facilityId
@@ -89,7 +80,7 @@ async function searchMedicines(
   const structured = await inventoryService.findStructuredMedicine(query);
 
   if (structured.status === 'matched') {
-    console.log('STRUCTURED MATCH FOUND:', structured.medicine.name);
+    console.log('[PRESCRIPTION OCR] master match type=structured');
     return resolveMedicineAvailability(structured.medicine, facilityId);
   }
 
@@ -116,15 +107,15 @@ async function searchMedicines(
       );
 
       if (results.length) {
-        console.log('DIRECT MATCH FOUND:', results[0].name);
+        console.log('[PRESCRIPTION OCR] master match type=direct');
         return results;
       }
     } catch (err) {
-      console.log('DIRECT MATCH FAILED:', err.message);
+      console.log('[PRESCRIPTION OCR] direct match unavailable');
     }
   }
 
-  console.log('NO DIRECT MATCH. TRYING FUZZY:', query);
+  console.log('[PRESCRIPTION OCR] master match type=fuzzy_attempt');
 
   const fuzzy = await inventoryService.findMedicineFuzzy(query, {
     requiredStrength: structured.identity.strength || undefined
@@ -145,7 +136,7 @@ async function searchMedicines(
     }];
   }
 
-  console.log('FUZZY MATCH FOUND:', medicine.name);
+  console.log('[PRESCRIPTION OCR] master match type=fuzzy');
 
   if (confidence >= 40 && confidence < 80) {
     return [{
@@ -263,10 +254,7 @@ async function findPatientByPhone(phone) {
     [phone]
   );
 
-  console.log(
-    'PATIENTS FOUND:',
-    JSON.stringify(rows, null, 2)
-  );
+  console.log(`Patient lookup results: ${rows.length}`);
 
   return rows;
 }
@@ -400,10 +388,7 @@ async function searchMedicinesFromText(
 
   } catch (err) {
 
-    console.log(
-      'MATCH FAILED:',
-      line
-    );
+    console.error('Medicine text matching failed category=MASTER_MATCH_FAILED');
   }
 }
 

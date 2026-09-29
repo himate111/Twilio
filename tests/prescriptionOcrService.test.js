@@ -65,3 +65,25 @@ describe('prescriptionOcrService', () => {
     worker.shutdown();
   });
 });
+describe('prescriptionOcrService Phase 3 Layout mode isolation', () => {
+  test('does not start a duplicate shadow Layout request when live Layout extraction mode is selected', async () => {
+    const worker = {
+      recognize: jest.fn().mockResolvedValue({ engine: ENGINE, text: 'synthetic', confidence: 0.95, lines: [], warnings: [] }),
+      shutdown: jest.fn()
+    };
+    const layoutShadowClient = { analyze: jest.fn() };
+    const service = createOcrService({
+      environment: {
+        PRESCRIPTION_EXTRACTION_MODE: 'layout',
+        PRESCRIPTION_LAYOUT_SHADOW_ENABLED: 'true'
+      },
+      worker,
+      layoutShadowClient
+    });
+
+    await service.recognize('synthetic.jpg');
+
+    expect(service.layoutShadowEnabled).toBe(false);
+    expect(layoutShadowClient.analyze).not.toHaveBeenCalled();
+  });
+});
